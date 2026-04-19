@@ -1,5 +1,5 @@
 data "aws_route53_zone" "main" {
-    name         = "ekstest.com."
+    name         = "${var.domain}."
     private_zone = false
   }
 

@@ -88,3 +88,14 @@ variable "sso_admin_role_arn" {
 variable "terraform_role_arn" {
     type = string
   }
+
+variable "domain" {
+    description = "Apex domain for the cluster (e.g., ekstest.com)"
+    type        = string
+  }
+
+  variable "acme_email" {
+    description = "Email for ACME account registration and Let's Encrypt expiry notifications"
+    type        = string
+    sensitive   = true
+  }
