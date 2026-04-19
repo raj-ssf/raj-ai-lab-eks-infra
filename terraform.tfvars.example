@@ -3,3 +3,5 @@ sso_admin_role_arn = "arn:aws:iam::<account-id>:role/aws-reserved/sso.amazonaws.
 terraform_role_arn = "arn:aws:iam::<account-id>:role/<terraform-role-name>"
 domain     = "<your-apex-domain>"
 acme_email = "<your-email>"
+argocd_app_repo_url     = "git@github.com:<your-username>/<your-app-repo>.git"
+argocd_app_repo_ssh_key = "-----BEGIN OPENSSH PRIVATE KEY-----\n...\n-----END OPENSSH PRIVATE KEY-----"
