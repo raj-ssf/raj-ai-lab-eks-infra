@@ -99,3 +99,15 @@ variable "domain" {
     type        = string
     sensitive   = true
   }
+  
+  variable "argocd_app_repo_url" {
+    type        = string
+    description = "Git SSH URL for the ArgoCD-managed app repo"
+    # Set in terraform.tfvars; example: git@github.com:<owner>/<repo>.git
+  }
+
+  variable "argocd_app_repo_ssh_key" {
+    type        = string
+    description = "SSH private key (PEM) for ArgoCD to clone the app repo"
+    sensitive   = true
+  }
