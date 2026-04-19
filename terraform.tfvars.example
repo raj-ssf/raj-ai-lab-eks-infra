@@ -1,3 +1,5 @@
 vpc_id             = "vpc-xxxxxxxxxxxxxxxxx"
 sso_admin_role_arn = "arn:aws:iam::<account-id>:role/aws-reserved/sso.amazonaws.com/<region>/AWSReservedSSO_<permission-set>_<suffix>"
 terraform_role_arn = "arn:aws:iam::<account-id>:role/<terraform-role-name>"
+domain     = "<your-apex-domain>"
+acme_email = "<your-email>"
