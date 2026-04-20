@@ -73,7 +73,7 @@ resource "helm_release" "external_dns" {
         }
       }
       domainFilters = [var.domain]
-      policy        = "sync"
+      policy        = "upsert-only"
       txtOwnerId    = var.cluster_name
       sources = [
         "service",
