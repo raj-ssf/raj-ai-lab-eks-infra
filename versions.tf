@@ -6,8 +6,8 @@ terraform {
       bucket         = "terraform-tf-state-raj-ai-lab-eks"
       key            = "raj-ai-lab-eks/terraform.tfstate"
       region         = "us-west-2"
-      dynamodb_table = "raj-ai-lab-eks-tflock"
       encrypt        = true
+      use_lockfile   = true
 }
 
   required_providers {
