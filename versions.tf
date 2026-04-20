@@ -3,11 +3,7 @@ terraform {
 
 
   backend "s3" {
-      bucket         = "terraform-tf-state-raj-ai-lab-eks"
-      key            = "raj-ai-lab-eks/terraform.tfstate"
-      region         = "us-west-2"
-      encrypt        = true
-      use_lockfile   = true
+      # values supplied via -backend-config=backend.hcl
 }
 
   required_providers {

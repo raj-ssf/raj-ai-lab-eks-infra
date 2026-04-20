@@ -16,3 +16,4 @@ terraform.rc
 tfplan
 *.tfplan
 plan.out
+backend.hcl

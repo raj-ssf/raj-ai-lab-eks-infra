@@ -26,5 +26,8 @@ resource "kubernetes_namespace" "argocd" {
       })
     ]
 
-    depends_on = [module.eks]
+    depends_on = [
+      module.eks,
+      helm_release.alb_controller,
+    ]
   }
