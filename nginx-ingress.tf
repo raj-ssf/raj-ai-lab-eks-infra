@@ -39,7 +39,21 @@ resource "kubernetes_namespace" "ingress_nginx" {
     depends_on = [
       module.eks,
       helm_release.alb_controller,
+      kubernetes_namespace.ingress_nginx,
     ]
+  }
+
+  # Force-delete fallback via provisioner — runs on destroy BEFORE helm uninstall
+  resource "null_resource" "nginx_cleanup" {
+    triggers = {
+      cluster_name = module.eks.cluster_name
+    }
+
+    provisioner "local-exec" {
+      when    = destroy
+      command = "kubectl -n ingress-nginx patch svc ingress-nginx-controller --type=merge -p '{\"metadata\":{\"finalizers\":null}}' 2>/dev/null || true; kubectl -n ingress-nginx delete svc ingress-nginx-controller --force --grace-period=0 --ignore-not-found=true 2>/dev/null || true"
+    }
+    depends_on = [helm_release.ingress_nginx] 
   }
 
   output "ingress_nginx_hostname" {
