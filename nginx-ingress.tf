@@ -31,6 +31,9 @@ resource "kubernetes_namespace" "ingress_nginx" {
           ingressClassResource = {
             name    = "nginx"
             default = true
+          nodeSelector = {
+          "topology.kubernetes.io/zone" = "us-west-2a"
+            }
           }
         }
       })

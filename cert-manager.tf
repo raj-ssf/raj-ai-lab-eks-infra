@@ -77,5 +77,6 @@ resource "aws_iam_policy" "cert_manager_route53" {
     depends_on = [
       module.eks,
       module.cert_manager_irsa,
+      helm_release.alb_controller,
     ]
   }

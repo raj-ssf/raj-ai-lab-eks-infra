@@ -88,5 +88,6 @@ resource "helm_release" "external_dns" {
   depends_on = [
     module.eks,
     module.external_dns_irsa,
+    helm_release.alb_controller,
   ]
 }
