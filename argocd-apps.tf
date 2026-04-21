@@ -61,7 +61,7 @@ resource "kubectl_manifest" "rag_service_app" {
         # These come from Terraform state and variables — tfvars is gitignored.
         kustomize = {
           images = [
-            "rag-service=${aws_ecr_repository.rag_service.repository_url}:dev",
+            "rag-service=${aws_ecr_repository.rag_service.repository_url}:latest",
           ]
           patches = [
             {
