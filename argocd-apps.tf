@@ -60,9 +60,6 @@ resource "kubectl_manifest" "rag_service_app" {
         # Env-specific values injected here (NOT in the public app repo).
         # These come from Terraform state and variables — tfvars is gitignored.
         kustomize = {
-          images = [
-            "rag-service=${aws_ecr_repository.rag_service.repository_url}:${local.rag_service_image_tag}",
-          ]
           patches = [
             {
               target = {
