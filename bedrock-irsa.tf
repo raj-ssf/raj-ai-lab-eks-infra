@@ -14,8 +14,8 @@ resource "aws_iam_policy" "rag_service_bedrock" {
           "bedrock:InvokeModelWithResponseStream",
         ]
         Resource = [
-          "arn:aws:bedrock:${var.region}:${data.aws_caller_identity.current.account_id}:inference-profile/us.anthropic.claude-3-5-haiku-20241022-v1:0",
-          "arn:aws:bedrock:*::foundation-model/anthropic.claude-3-5-haiku-20241022-v1:0",
+          "arn:aws:bedrock:${var.region}:${data.aws_caller_identity.current.account_id}:inference-profile/us.anthropic.*",
+          "arn:aws:bedrock:*::foundation-model/anthropic.*",
         ]
       },
     ]
