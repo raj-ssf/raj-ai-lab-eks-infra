@@ -99,7 +99,7 @@ variable "domain" {
     type        = string
     sensitive   = true
   }
-  
+
   variable "argocd_app_repo_url" {
     type        = string
     description = "Git SSH URL for the ArgoCD-managed app repo"
@@ -110,4 +110,14 @@ variable "domain" {
     type        = string
     description = "SSH private key (PEM) for ArgoCD to clone the app repo"
     sensitive   = true
+  }
+
+  variable "gha_repo_owner" {
+    type        = string
+    description = "GitHub org/user owning the app repo"
+  }
+
+  variable "gha_repo_name" {
+    type        = string
+    description = "GitHub repo name containing the GHA workflow"
   }
