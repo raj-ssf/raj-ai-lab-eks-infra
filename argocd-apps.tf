@@ -55,7 +55,7 @@ resource "kubectl_manifest" "rag_service_app" {
       source = {
         repoURL        = var.argocd_app_repo_url
         targetRevision = "HEAD"
-        path           = "rag-service"
+        path           = "rag-service/overlays/dev"
       }
       destination = {
         server    = "https://kubernetes.default.svc"
