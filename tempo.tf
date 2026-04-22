@@ -3,7 +3,7 @@ resource "helm_release" "tempo" {
   namespace  = kubernetes_namespace.monitoring.metadata[0].name
   repository = "https://grafana.github.io/helm-charts"
   chart      = "tempo"    # single-binary (monolithic) chart
-  version    = "1.14.1"
+  version    = "1.24.4"
 
   values = [
     yamlencode({
