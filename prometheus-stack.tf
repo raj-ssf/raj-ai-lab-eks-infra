@@ -66,9 +66,31 @@ resource "helm_release" "kube_prometheus_stack" {
           accessModes      = ["ReadWriteOnce"]
         }
 
-        # Ingress wired in a separate step (grafana-ingress.tf).
         service = {
           type = "ClusterIP"
+        }
+
+        # Ingress → NGINX → Let's Encrypt cert for grafana.<domain>.
+        ingress = {
+          enabled          = true
+          ingressClassName = "nginx"
+          annotations = {
+            "cert-manager.io/cluster-issuer" = "letsencrypt-prod"
+          }
+          hosts = ["grafana.${var.domain}"]
+          tls = [{
+            hosts      = ["grafana.${var.domain}"]
+            secretName = "grafana-tls"
+          }]
+        }
+
+        # Set Grafana's idea of its own URL so sign-in redirects, share links,
+        # and SSO (later) work correctly behind the ingress.
+        "grafana.ini" = {
+          server = {
+            domain   = "grafana.${var.domain}"
+            root_url = "https://grafana.${var.domain}"
+          }
         }
 
         # Pre-declare the Tempo datasource via the sidecar (Tempo installed

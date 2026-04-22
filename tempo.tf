@@ -3,7 +3,7 @@ resource "helm_release" "tempo" {
   namespace  = kubernetes_namespace.monitoring.metadata[0].name
   repository = "https://grafana.github.io/helm-charts"
   chart      = "tempo"    # single-binary (monolithic) chart
-  version    = "1.14.1"
+  version    = "1.24.4"
 
   values = [
     yamlencode({
@@ -100,7 +100,7 @@ resource "kubernetes_config_map_v1" "grafana_tempo_datasource" {
         name      = "Tempo"
         type      = "tempo"
         access    = "proxy"
-        url       = "http://tempo.monitoring.svc.cluster.local:3100"
+        url       = "http://tempo.monitoring.svc.cluster.local:3200"
         uid       = "tempo"
         isDefault = false
         jsonData = {
