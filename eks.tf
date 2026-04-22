@@ -14,6 +14,21 @@ module "eks" {
   # the orphaned aws_iam_openid_connect_provider and keeps IAM clean.
   enable_irsa = false
 
+  # Module's default node SG only opens 1025-65535/tcp between nodes, which
+  # blocks cross-node pod-to-pod traffic on low ports (80, 443, 8443, etc.).
+  # Broke argocd-server / grafana → ingress-nginx:443 calls needed for OIDC
+  # discovery. Open all protocols/ports between nodes.
+  node_security_group_additional_rules = {
+    ingress_self_all = {
+      description = "Node-to-node: all ports/protocols (pod-to-pod on low ports)"
+      protocol    = "-1"
+      from_port   = 0
+      to_port     = 0
+      type        = "ingress"
+      self        = true
+    }
+  }
+
   access_entries = {
     sso_admin = {
       principal_arn = var.sso_admin_role_arn
@@ -30,6 +45,32 @@ module "eks" {
     coredns                = {
       most_recent                 = true
       resolve_conflicts_on_update = "OVERWRITE"
+      # Rewrite keycloak.<domain> to the in-cluster ingress-nginx Service.
+      # Without this, pods resolving keycloak.<domain> get the NLB public IP
+      # and AWS drops the hairpin loopback with "connection reset by peer".
+      # This full Corefile mirrors the EKS default + one `rewrite` line.
+      configuration_values = jsonencode({
+        corefile = <<-EOT
+          .:53 {
+              errors
+              health {
+                  lameduck 5s
+              }
+              ready
+              rewrite name keycloak.${var.domain} ingress-nginx-controller.ingress-nginx.svc.cluster.local
+              kubernetes cluster.local in-addr.arpa ip6.arpa {
+                  pods insecure
+                  fallthrough in-addr.arpa ip6.arpa
+              }
+              prometheus :9153
+              forward . /etc/resolv.conf
+              cache 30
+              loop
+              reload
+              loadbalance
+          }
+        EOT
+      })
     }
     kube-proxy             = {
       most_recent                 = true

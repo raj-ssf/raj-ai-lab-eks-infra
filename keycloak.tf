@@ -115,6 +115,27 @@ resource "helm_release" "keycloak" {
         { name = "JAVA_OPTS_KC_HEAP",    value = "-Xms256m -Xmx512m" },
       ]
 
+      # Realm import: mount the ConfigMap rendered by keycloak-realm.tf at the
+      # dir Keycloak scans, and tell the startup script to import on boot.
+      # First boot imports the raj-ai-lab realm; subsequent boots skip the
+      # import (default strategy), so UI-edited state is not clobbered.
+      extraStartupArgs = "--import-realm"
+      extraVolumes = [
+        {
+          name = "realm-import"
+          configMap = {
+            name = kubernetes_config_map_v1.keycloak_realm_import.metadata[0].name
+          }
+        },
+      ]
+      extraVolumeMounts = [
+        {
+          name      = "realm-import"
+          mountPath = "/opt/bitnami/keycloak/data/import"
+          readOnly  = true
+        },
+      ]
+
       # Probes: trust chart defaults. Bitnami/keycloak 25.x already targets
       # the management port 9000 with /health/* when KC_HEALTH_ENABLED=true.
 
@@ -152,6 +173,7 @@ resource "helm_release" "keycloak" {
     helm_release.keycloak_postgres,
     helm_release.cert_manager,
     kubernetes_storage_class_v1.gp3,
+    kubernetes_config_map_v1.keycloak_realm_import,
   ]
 }
 
