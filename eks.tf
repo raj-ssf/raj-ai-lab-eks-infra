@@ -9,6 +9,11 @@ module "eks" {
   subnet_ids = data.aws_subnets.private.ids
   enable_cluster_creator_admin_permissions = true
 
+  # IRSA OIDC provider is unused since the Pod Identity migration (all 5
+  # workloads now use aws_eks_pod_identity_association). Disabling removes
+  # the orphaned aws_iam_openid_connect_provider and keeps IAM clean.
+  enable_irsa = false
+
   access_entries = {
     sso_admin = {
       principal_arn = var.sso_admin_role_arn
