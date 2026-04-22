@@ -114,3 +114,48 @@ resource "kubectl_manifest" "rag_service_app" {
     kubernetes_secret.argocd_app_repo,
   ]
 }
+
+resource "kubectl_manifest" "qdrant_app" {
+  yaml_body = yamlencode({
+    apiVersion = "argoproj.io/v1alpha1"
+    kind       = "Application"
+    metadata = {
+      name      = "qdrant"
+      namespace = kubernetes_namespace.argocd.metadata[0].name
+      finalizers = [
+        "resources-finalizer.argocd.argoproj.io",
+      ]
+    }
+    spec = {
+      project = "default"
+      source = {
+        repoURL        = var.argocd_app_repo_url
+        targetRevision = "HEAD"
+        path           = "qdrant/overlays/dev"
+        # No env-specific injection — Qdrant has no account/domain-specific values.
+      }
+      destination = {
+        server    = "https://kubernetes.default.svc"
+        namespace = "qdrant"
+      }
+      syncPolicy = {
+        automated = {
+          prune    = true
+          selfHeal = true
+        }
+        syncOptions = [
+          "CreateNamespace=true",
+          "PrunePropagationPolicy=foreground",
+          # StatefulSets sometimes take several reconcile cycles to settle
+          # (PVC provisioning, pod startup). Give ArgoCD a bit more patience.
+          "RespectIgnoreDifferences=true",
+        ]
+      }
+    }
+  })
+
+  depends_on = [
+    helm_release.argocd,
+    kubernetes_secret.argocd_app_repo,
+  ]
+}
