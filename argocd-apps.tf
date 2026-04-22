@@ -57,24 +57,11 @@ resource "kubectl_manifest" "rag_service_app" {
         targetRevision = "HEAD"
         path           = "rag-service/overlays/dev"
 
-        # Env-specific values injected here (NOT in the public app repo).
-        # These come from Terraform state and variables — tfvars is gitignored.
+        # Env-specific Ingress host injected here (NOT in the public app repo).
+        # SA role binding is handled by aws_eks_pod_identity_association.rag_service
+        # in bedrock-irsa.tf — no annotation needed on the SA.
         kustomize = {
           patches = [
-            {
-              target = {
-                kind = "ServiceAccount"
-                name = "rag-service"
-              }
-              patch = <<-EOT
-                apiVersion: v1
-                kind: ServiceAccount
-                metadata:
-                  name: rag-service
-                  annotations:
-                    eks.amazonaws.com/role-arn: ${module.rag_service_irsa.iam_role_arn}
-              EOT
-            },
             {
               target = {
                 kind = "Ingress"
