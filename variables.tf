@@ -121,3 +121,9 @@ variable "domain" {
     type        = string
     description = "GitHub repo name containing the GHA workflow"
   }
+
+  variable "grafana_admin_password" {
+    type        = string
+    description = "Initial admin password for Grafana — rotate via UI once logged in"
+    sensitive   = true
+  }
