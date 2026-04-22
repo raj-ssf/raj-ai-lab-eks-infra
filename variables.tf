@@ -127,3 +127,15 @@ variable "domain" {
     description = "Initial admin password for Grafana — rotate via UI once logged in"
     sensitive   = true
   }
+
+  variable "keycloak_admin_password" {
+    type        = string
+    description = "Bootstrap admin password for the Keycloak master realm"
+    sensitive   = true
+  }
+
+  variable "keycloak_db_password" {
+    type        = string
+    description = "Password for the Postgres 'keycloak' user backing Keycloak"
+    sensitive   = true
+  }
