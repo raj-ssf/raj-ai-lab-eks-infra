@@ -23,22 +23,21 @@ resource "aws_iam_policy" "external_dns" {
   })
 }
 
-module "external_dns_irsa" {
-  source  = "terraform-aws-modules/iam/aws//modules/iam-role-for-service-accounts-eks"
-  version = "~> 5.44"
+resource "aws_iam_role" "external_dns" {
+  name               = "${var.cluster_name}-external-dns"
+  assume_role_policy = data.aws_iam_policy_document.pod_identity_trust.json
+}
 
-  role_name = "${var.cluster_name}-external-dns"
+resource "aws_iam_role_policy_attachment" "external_dns" {
+  role       = aws_iam_role.external_dns.name
+  policy_arn = aws_iam_policy.external_dns.arn
+}
 
-  role_policy_arns = {
-    route53 = aws_iam_policy.external_dns.arn
-  }
-
-  oidc_providers = {
-    main = {
-      provider_arn               = module.eks.oidc_provider_arn
-      namespace_service_accounts = ["external-dns:external-dns"]
-    }
-  }
+resource "aws_eks_pod_identity_association" "external_dns" {
+  cluster_name    = module.eks.cluster_name
+  namespace       = "external-dns"
+  service_account = "external-dns"
+  role_arn        = aws_iam_role.external_dns.arn
 }
 
 resource "kubernetes_namespace" "external_dns" {
@@ -68,9 +67,7 @@ resource "helm_release" "external_dns" {
       serviceAccount = {
         create = true
         name   = "external-dns"
-        annotations = {
-          "eks.amazonaws.com/role-arn" = module.external_dns_irsa.iam_role_arn
-        }
+        # No annotations needed: Pod Identity binds the SA to the role.
       }
       domainFilters = [var.domain]
       policy        = "upsert-only"
@@ -87,7 +84,7 @@ resource "helm_release" "external_dns" {
 
   depends_on = [
     module.eks,
-    module.external_dns_irsa,
+    aws_eks_pod_identity_association.external_dns,
     helm_release.alb_controller,
   ]
 }

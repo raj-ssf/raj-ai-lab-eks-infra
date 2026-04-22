@@ -39,8 +39,13 @@ module "eks" {
       resolve_conflicts_on_update = "OVERWRITE"
     }
     aws-ebs-csi-driver     = {
-      most_recent                 = true
-      service_account_role_arn = module.ebs_csi_irsa.iam_role_arn
+      most_recent = true
+      # Addon keeps service_account_role_arn pointing at the same role name
+      # as before — the underlying role was rebuilt with a Pod Identity trust
+      # policy, so the IRSA path is now a no-op. Real creds come from
+      # aws_eks_pod_identity_association.ebs_csi (see iam-ebs-csi.tf), which
+      # the AWS SDK picks up first in the credential chain.
+      service_account_role_arn = aws_iam_role.ebs_csi.arn
     }
   }
 

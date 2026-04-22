@@ -1,16 +1,18 @@
-module "alb_controller_irsa" {
-  source  = "terraform-aws-modules/iam/aws//modules/iam-role-for-service-accounts-eks"
-  version = "~> 5.44"
+resource "aws_iam_role" "alb_controller" {
+  name               = "${var.cluster_name}-alb-controller"
+  assume_role_policy = data.aws_iam_policy_document.pod_identity_trust.json
+}
 
-  role_name                              = "${var.cluster_name}-alb-controller"
-  attach_load_balancer_controller_policy = true
+resource "aws_iam_role_policy_attachment" "alb_controller" {
+  role       = aws_iam_role.alb_controller.name
+  policy_arn = aws_iam_policy.alb_controller.arn # defined in pod-identity.tf
+}
 
-  oidc_providers = {
-    main = {
-      provider_arn               = module.eks.oidc_provider_arn
-      namespace_service_accounts = ["kube-system:aws-load-balancer-controller"]
-    }
-  }
+resource "aws_eks_pod_identity_association" "alb_controller" {
+  cluster_name    = module.eks.cluster_name
+  namespace       = "kube-system"
+  service_account = "aws-load-balancer-controller"
+  role_arn        = aws_iam_role.alb_controller.arn
 }
 
 resource "helm_release" "alb_controller" {
@@ -35,10 +37,7 @@ resource "helm_release" "alb_controller" {
     value = "aws-load-balancer-controller"
   }
 
-  set {
-    name  = "serviceAccount.annotations.eks\\.amazonaws\\.com/role-arn"
-    value = module.alb_controller_irsa.iam_role_arn
-  }
+  # No SA role-arn annotation: Pod Identity binds the SA to the role.
 
   set {
     name  = "region"
@@ -50,5 +49,8 @@ resource "helm_release" "alb_controller" {
     value = var.vpc_id
   }
 
-  depends_on = [module.eks]
+  depends_on = [
+    module.eks,
+    aws_eks_pod_identity_association.alb_controller,
+  ]
 }
