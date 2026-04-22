@@ -27,6 +27,19 @@ module "eks" {
       type        = "ingress"
       self        = true
     }
+    # Cluster SG (EKS apiserver) → node SG on all ports. Default module only
+    # opens 443/4443/6443/8443/9443/10250, which silently drops webhook
+    # traffic to pods listening on other ports (Vault Agent Injector on 8080
+    # is the case that bit us). failurePolicy=Ignore on the webhook means no
+    # visible error — pods are created without mutation.
+    ingress_cluster_all = {
+      description                   = "Cluster apiserver to node: all ports (webhook targets)"
+      protocol                      = "-1"
+      from_port                     = 0
+      to_port                       = 0
+      type                          = "ingress"
+      source_cluster_security_group = true
+    }
   }
 
   access_entries = {
