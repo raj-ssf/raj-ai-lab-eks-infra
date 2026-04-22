@@ -100,7 +100,7 @@ resource "kubernetes_config_map_v1" "grafana_tempo_datasource" {
         name      = "Tempo"
         type      = "tempo"
         access    = "proxy"
-        url       = "http://tempo.monitoring.svc.cluster.local:3100"
+        url       = "http://tempo.monitoring.svc.cluster.local:3200"
         uid       = "tempo"
         isDefault = false
         jsonData = {
