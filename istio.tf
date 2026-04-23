@@ -103,15 +103,33 @@ resource "helm_release" "istiod" {
   depends_on = [helm_release.istio_base]
 }
 
-# Label the rag namespace so newly-created pods in it get the Envoy sidecar
-# injected by istiod's mutating webhook. kubernetes_labels merges labels
+# Label namespaces for sidecar injection. kubernetes_labels merges labels
 # without owning the Namespace object — ArgoCD's CreateNamespace=true
-# syncOption and this label can coexist.
-resource "kubernetes_labels" "rag_istio_injection" {
+# syncOption and these labels can coexist.
+#
+# Skipped intentionally (see the commit message for reasoning):
+#   vault           (raft port 8201 uses its own TLS — double-encrypt breaks)
+#   monitoring      (Prometheus scrape loops, Tempo OTel path)
+#   cert-manager    (all traffic is to external Route53 / ACME)
+#   external-dns    (same)
+#   ingress-nginx   (north-south entry, not a mesh participant)
+#   vault-secrets-operator, kube-system, istio-system (system)
+locals {
+  istio_meshed_namespaces = toset([
+    "rag",
+    "qdrant",
+    "keycloak",
+    "argocd",
+  ])
+}
+
+resource "kubernetes_labels" "istio_injection" {
+  for_each = local.istio_meshed_namespaces
+
   api_version = "v1"
   kind        = "Namespace"
   metadata {
-    name = "rag"
+    name = each.value
   }
   labels = {
     "istio-injection" = "enabled"
@@ -122,8 +140,11 @@ resource "kubernetes_labels" "rag_istio_injection" {
   depends_on = [
     helm_release.istiod,
     helm_release.istio_cni,
-    # Namespace exists once the ArgoCD app has synced rag-service at least
-    # once; after that this label add is safe.
+    # Namespaces come up via their respective apps/helm_releases. Labelling
+    # before the namespace exists is fine for kubernetes_labels (it'll retry).
     kubectl_manifest.rag_service_app,
+    kubectl_manifest.qdrant_app,
+    kubernetes_namespace.keycloak,
+    kubernetes_namespace.argocd,
   ]
 }
