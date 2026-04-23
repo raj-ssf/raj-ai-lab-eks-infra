@@ -148,3 +148,29 @@ resource "kubernetes_labels" "istio_injection" {
     kubernetes_namespace.argocd,
   ]
 }
+
+# STRICT mTLS on qdrant. qdrant's only caller is rag-service (meshed), so
+# enforcing STRICT here rejects any plaintext / non-mTLS traffic without
+# breaking a user-facing path. We can't flip mesh-wide STRICT because
+# NGINX ingress isn't meshed — its inbound traffic to rag/keycloak/argocd
+# pods would get rejected.
+resource "kubectl_manifest" "qdrant_peer_auth_strict" {
+  yaml_body = yamlencode({
+    apiVersion = "security.istio.io/v1beta1"
+    kind       = "PeerAuthentication"
+    metadata = {
+      name      = "default"
+      namespace = "qdrant"
+    }
+    spec = {
+      mtls = {
+        mode = "STRICT"
+      }
+    }
+  })
+
+  depends_on = [
+    helm_release.istiod,
+    kubernetes_labels.istio_injection,
+  ]
+}
