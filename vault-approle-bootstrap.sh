@@ -44,6 +44,12 @@ path "secret/metadata/*"            { capabilities = ["create","read","update","
 path "secret/delete/*"              { capabilities = ["update"] }
 path "secret/destroy/*"             { capabilities = ["update"] }
 
+# Database secrets engine: configure connections + dynamic-cred roles
+path "database/config/*"            { capabilities = ["create","read","update","delete","list"] }
+path "database/roles/*"              { capabilities = ["create","read","update","delete","list"] }
+path "database/static-roles/*"       { capabilities = ["create","read","update","delete","list"] }
+path "database/rotate-root/*"        { capabilities = ["update"] }
+
 # Read ACL capabilities for self-diagnosis
 path "sys/capabilities-self"        { capabilities = ["update"] }
 EOP

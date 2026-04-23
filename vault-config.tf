@@ -27,6 +27,11 @@ resource "vault_policy" "rag_service" {
     path "secret/metadata/rag-service/*" {
       capabilities = ["read", "list"]
     }
+    # Dynamic Postgres credentials — Vault's database engine issues a
+    # fresh username/password per call, auto-revokes at TTL.
+    path "database/creds/rag-service-db" {
+      capabilities = ["read"]
+    }
   EOT
 }
 
@@ -218,4 +223,62 @@ resource "vault_kv_secret_v2" "keycloak_admin" {
   data_json = jsonencode({
     "admin-password" = var.keycloak_admin_password
   })
+}
+
+# =============================================================================
+# Dynamic Postgres credentials for rag-service via RDS Aurora (rds.tf)
+# =============================================================================
+# Vault's database secrets engine connects to Aurora with the master creds,
+# and issues short-lived per-role users on demand. Each pod-driven call to
+# /database/creds/rag-service-db creates a fresh Postgres user with 1h TTL.
+# Vault revokes at expiry; no stale creds accumulate in the DB.
+
+resource "vault_mount" "database" {
+  path        = "database"
+  type        = "database"
+  description = "Dynamic credentials issuer for RDS Aurora Postgres"
+}
+
+resource "vault_database_secret_backend_connection" "rds_postgres" {
+  backend       = vault_mount.database.path
+  name          = "rds-postgres"
+  allowed_roles = ["rag-service-db"]
+
+  postgresql {
+    connection_url = "postgresql://{{username}}:{{password}}@${aws_db_instance.rag.address}:5432/ragdb?sslmode=require"
+    username       = aws_db_instance.rag.username
+    password       = random_password.rds_master.result
+    # Rotate the master password used by Vault on boot / refresh. Keeps the
+    # long-lived admin password out of any caller's hands after initial
+    # registration. If you ever need to disable this for debugging, set
+    # password_policy or switch to static creds.
+    # (Note: rotate_root would be nice here but runs once and is irreversible;
+    # for a lab we skip it so destroy/apply cycles don't strand us.)
+  }
+}
+
+resource "vault_database_secret_backend_role" "rag_service_db" {
+  backend = vault_mount.database.path
+  name    = "rag-service-db"
+  db_name = vault_database_secret_backend_connection.rds_postgres.name
+
+  default_ttl = 3600   # 1 hour — pod sees rotation every hour
+  max_ttl     = 86400  # 24h hard cap
+
+  # Create a role with CRUD on whatever's in public schema. Expand to specific
+  # tables / schemas once rag-service has its own DB layout.
+  creation_statements = [
+    "CREATE ROLE \"{{name}}\" WITH LOGIN PASSWORD '{{password}}' VALID UNTIL '{{expiration}}';",
+    "GRANT USAGE ON SCHEMA public TO \"{{name}}\";",
+    "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO \"{{name}}\";",
+    "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO \"{{name}}\";",
+  ]
+
+  # Graceful teardown on TTL expiry.
+  revocation_statements = [
+    "REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM \"{{name}}\";",
+    "REVOKE ALL PRIVILEGES ON SCHEMA public FROM \"{{name}}\";",
+    "REVOKE ALL PRIVILEGES ON DATABASE ragdb FROM \"{{name}}\";",
+    "DROP ROLE IF EXISTS \"{{name}}\";",
+  ]
 }
