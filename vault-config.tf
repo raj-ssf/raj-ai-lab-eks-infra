@@ -107,3 +107,43 @@ resource "vault_kv_secret_v2" "grafana_oidc" {
     client_secret = random_password.keycloak_grafana_client_secret.result
   })
 }
+
+# =============================================================================
+# ArgoCD: Keycloak OIDC client secret via Vault Secrets Operator (VSO)
+# =============================================================================
+# ArgoCD's oidc.config requires a k8s Secret (no file/env fallback), so VSO
+# syncs this Vault path into a k8s Secret that argocd-server reads via the
+# $<secret>:<key> reference syntax. VSO is declared in vso.tf; the VSO auth
+# SA + VaultStaticSecret live in argocd-vso.tf.
+
+resource "vault_policy" "argocd" {
+  name = "argocd"
+
+  policy = <<-EOT
+    path "secret/data/argocd/*" {
+      capabilities = ["read"]
+    }
+    path "secret/metadata/argocd/*" {
+      capabilities = ["read", "list"]
+    }
+  EOT
+}
+
+resource "vault_kubernetes_auth_backend_role" "argocd" {
+  backend                          = "kubernetes"
+  role_name                        = "argocd"
+  bound_service_account_names      = ["argocd-vso"]
+  bound_service_account_namespaces = ["argocd"]
+  token_ttl                        = 3600
+  token_max_ttl                    = 86400
+  token_policies                   = [vault_policy.argocd.name]
+}
+
+resource "vault_kv_secret_v2" "argocd_oidc" {
+  mount = "secret"
+  name  = "argocd/oidc"
+
+  data_json = jsonencode({
+    client_secret = random_password.keycloak_argocd_client_secret.result
+  })
+}

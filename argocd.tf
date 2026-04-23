@@ -25,20 +25,17 @@ resource "helm_release" "argocd" {
           # able to redirect back to this host after login.
           url = "https://argocd.${var.domain}"
 
-          # OIDC configuration. clientSecret is a reference ($prefix) to a
-          # key in argocd-secret; the actual value is merged in below via
-          # configs.secret.extra.
+          # OIDC configuration. clientSecret is resolved from a k8s Secret
+          # named argocd-oidc-vault (managed by VSO — see argocd-vso.tf).
+          # ArgoCD's $<secret>:<key> syntax reads from any named Secret;
+          # we use that instead of the default argocd-secret so Vault can
+          # own the value without fighting the chart for that Secret.
           "oidc.config" = yamlencode({
             name         = "Keycloak"
             issuer       = "https://keycloak.${var.domain}/realms/raj-ai-lab-eks"
             clientID     = "argocd"
-            clientSecret = "$oidc.keycloak.clientSecret"
-            # Only request scopes Keycloak actually has. The `groups` claim
-            # flows via our protocol mapper on the argocd client (see
-            # keycloak-realm.tf), so we don't need a `groups` *scope*.
+            clientSecret = "$argocd-oidc-vault:client_secret"
             requestedScopes = ["openid", "profile", "email"]
-            # Force groups into the ID token even when the user has many —
-            # by default Keycloak keeps them in the UserInfo response only.
             requestedIDTokenClaims = {
               groups = { essential = true }
             }
@@ -55,12 +52,8 @@ resource "helm_release" "argocd" {
           scopes = "[groups]"
         }
 
-        # Chart-managed argocd-secret. `extra` keys get stringData-merged in.
-        secret = {
-          extra = {
-            "oidc.keycloak.clientSecret" = random_password.keycloak_argocd_client_secret.result
-          }
-        }
+        # OIDC client secret is delivered via VSO → argocd-oidc-vault Secret;
+        # no longer merged into the chart-managed argocd-secret.
       }
 
       server = {
