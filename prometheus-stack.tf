@@ -29,6 +29,50 @@ resource "helm_release" "kube_prometheus_stack" {
           probeSelectorNilUsesHelmValues          = false
           ruleSelectorNilUsesHelmValues           = false
 
+          # Hand-rolled scrape for Envoy sidecars. Can't use a PodMonitor —
+          # the operator auto-generates a `keep container_port_number==15090`
+          # relabel, and Prometheus 2.x pod-SD doesn't enumerate initContainer
+          # ports. Our istio-proxy runs as an init container with
+          # restartPolicy=Always (native sidecar), so that filter drops every
+          # target. This config overrides __address__ directly, no port-
+          # enumeration dependency.
+          additionalScrapeConfigs = [{
+            job_name     = "istio-envoy-stats"
+            metrics_path = "/stats/prometheus"
+            kubernetes_sd_configs = [{
+              role = "pod"
+              namespaces = {
+                names = ["rag", "qdrant", "keycloak", "argocd"]
+              }
+            }]
+            relabel_configs = [
+              {
+                action        = "drop"
+                source_labels = ["__meta_kubernetes_pod_phase"]
+                regex         = "(Failed|Succeeded|Pending)"
+              },
+              # Rewrite target address to pod_ip:15020. Port 15020 is
+              # istio-agent's merged Prometheus endpoint — emits istio_*
+              # telemetry (istio_requests_total etc.). Port 15090 is raw
+              # Envoy stats (envoy_* only) and wouldn't populate the Istio
+              # dashboards. Prometheus dedupes multiple targets with the
+              # same __address__, so we collapse to one per pod.
+              {
+                source_labels = ["__meta_kubernetes_pod_ip"]
+                target_label  = "__address__"
+                replacement   = "$${1}:15020"
+              },
+              {
+                source_labels = ["__meta_kubernetes_namespace"]
+                target_label  = "namespace"
+              },
+              {
+                source_labels = ["__meta_kubernetes_pod_name"]
+                target_label  = "pod"
+              },
+            ]
+          }]
+
           retention = "7d"
 
           storageSpec = {

@@ -175,6 +175,49 @@ resource "kubectl_manifest" "qdrant_peer_auth_strict" {
   ]
 }
 
+# =============================================================================
+# Prometheus scrape config for Istio — required for the dashboards to populate.
+# istio/istiod chart doesn't ship ServiceMonitor/PodMonitor; without these, the
+# istio_requests_total and pilot_xds metrics never arrive in Prometheus even
+# though Envoy + istiod are emitting them.
+# =============================================================================
+
+# Envoy sidecar scraping gets kicked up to kube-prometheus-stack's
+# additionalScrapeConfigs instead of a PodMonitor (see prometheus-stack.tf).
+# PodMonitor would always auto-generate a
+#   keep container_port_number == 15090
+# relabel, and Prometheus 2.x pod-SD doesn't enumerate initContainer ports.
+# With native sidecars (istio-proxy is an init container), every target gets
+# dropped. A hand-rolled scrape config rewrites __address__ to pod_ip:15090
+# directly, sidestepping the port enumeration problem. Revisit once we're
+# on Prometheus 3.x (kube-prometheus-stack 76+), which does enumerate
+# initContainer ports.
+
+# istiod (Pilot) control-plane metrics on port 15014. Powers the Control Plane
+# dashboard.
+resource "kubectl_manifest" "istiod_service_monitor" {
+  yaml_body = yamlencode({
+    apiVersion = "monitoring.coreos.com/v1"
+    kind       = "ServiceMonitor"
+    metadata = {
+      name      = "istiod"
+      namespace = kubernetes_namespace.istio_system.metadata[0].name
+      labels    = { release = "kube-prometheus-stack" }
+    }
+    spec = {
+      selector = {
+        matchLabels = { istio = "pilot" }
+      }
+      endpoints = [{
+        port     = "http-monitoring"
+        interval = "15s"
+      }]
+    }
+  })
+
+  depends_on = [helm_release.kube_prometheus_stack, helm_release.istiod]
+}
+
 # Layer-7 authorization on top of mTLS: only the rag-service SA can access
 # qdrant. Any other meshed SPIFFE identity (e.g., a random pod in another
 # meshed ns that happens to have mTLS) is rejected with RBAC: access denied.
