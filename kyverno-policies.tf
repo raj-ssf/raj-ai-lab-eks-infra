@@ -43,6 +43,14 @@ resource "kubectl_manifest" "kyverno_verify_rag_service_image" {
                 resources = {
                   kinds      = ["Pod"]
                   namespaces = ["rag"]
+                  # CREATE only — avoids mutateDigest's rough edge where
+                  # UPDATE operations on existing Deployments (e.g. patching
+                  # replicas/revisionHistoryLimit) fail validation because
+                  # the Deployment's image is still in tag form and the
+                  # mutating phase doesn't rewrite it unless the image
+                  # itself is being modified. New Pods always go through
+                  # admission CREATE, so the signature gate stays intact.
+                  operations = ["CREATE"]
                 }
               },
             ]
