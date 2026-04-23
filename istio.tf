@@ -174,3 +174,35 @@ resource "kubectl_manifest" "qdrant_peer_auth_strict" {
     kubernetes_labels.istio_injection,
   ]
 }
+
+# Layer-7 authorization on top of mTLS: only the rag-service SA can access
+# qdrant. Any other meshed SPIFFE identity (e.g., a random pod in another
+# meshed ns that happens to have mTLS) is rejected with RBAC: access denied.
+# STRICT mTLS alone says "encrypted+authenticated"; this adds "authorized".
+resource "kubectl_manifest" "qdrant_authz_policy" {
+  yaml_body = yamlencode({
+    apiVersion = "security.istio.io/v1"
+    kind       = "AuthorizationPolicy"
+    metadata = {
+      name      = "allow-rag-service-only"
+      namespace = "qdrant"
+    }
+    spec = {
+      action = "ALLOW"
+      # Only principals matching this list are allowed. Action=ALLOW with a
+      # rules block means "allow if any rule matches, deny otherwise."
+      rules = [{
+        from = [{
+          source = {
+            principals = ["cluster.local/ns/rag/sa/rag-service"]
+          }
+        }]
+      }]
+    }
+  })
+
+  depends_on = [
+    helm_release.istiod,
+    kubectl_manifest.qdrant_peer_auth_strict,
+  ]
+}
