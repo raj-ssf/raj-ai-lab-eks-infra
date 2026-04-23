@@ -41,8 +41,16 @@ resource "kubectl_manifest" "kyverno_verify_rag_service_image" {
             any = [
               {
                 resources = {
-                  kinds      = ["Pod"]
-                  namespaces = ["rag"]
+                  kinds = ["Pod"]
+                  # No namespace filter — the rule is scoped instead via
+                  # the imageReferences glob below (our ECR repo). Effect:
+                  # any pod IN ANY NAMESPACE pulling an image whose URL
+                  # matches 050693401425...rag-service* must carry a valid
+                  # cosign signature from our GHA workflow. Upstream
+                  # images (Istio, Vault, Bitnami, etc.) are out of scope
+                  # for this rule and pass through unchecked — they're
+                  # handled (or will be) by separate per-publisher rules.
+                  #
                   # CREATE only — avoids mutateDigest's rough edge where
                   # UPDATE operations on existing Deployments (e.g. patching
                   # replicas/revisionHistoryLimit) fail validation because
