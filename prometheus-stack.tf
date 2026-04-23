@@ -4,19 +4,10 @@ resource "kubernetes_namespace" "monitoring" {
   }
 }
 
-# OIDC client secret for Grafana → Keycloak. Kept in a k8s Secret (not in
-# the helm values) so it doesn't land in tfstate-rendered manifests.
-# Consumed by grafana.envValueFrom.GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET below.
-resource "kubernetes_secret_v1" "grafana_oidc" {
-  metadata {
-    name      = "grafana-oidc"
-    namespace = kubernetes_namespace.monitoring.metadata[0].name
-  }
-  data = {
-    client_secret = random_password.keycloak_grafana_client_secret.result
-  }
-  type = "Opaque"
-}
+# grafana-oidc k8s Secret was retired — Grafana now receives the OIDC
+# client secret from Vault via the Agent Injector sidecar (see the
+# podAnnotations block in the grafana values below, and vault-config.tf
+# for the policy/role/KV entry).
 
 resource "helm_release" "kube_prometheus_stack" {
   name       = "kube-prometheus-stack"
@@ -69,7 +60,15 @@ resource "helm_release" "kube_prometheus_stack" {
 
       # --- Grafana ---
       grafana = {
-        adminUser     = "admin"
+        adminUser = "admin"
+        # adminPassword is still set so the chart creates its admin Secret
+        # (Grafana needs *something* to bootstrap on first boot), but the
+        # effective runtime password comes from GF_SECURITY_ADMIN_PASSWORD__FILE
+        # below, which reads the Vault-injected file and wins over the
+        # plain env var. Rotating the Vault value then rolling the pod
+        # updates the password — except Grafana persists admin creds in
+        # SQLite on first boot, so subsequent rotations need a UI/API
+        # change too. Known Grafana wart; acceptable for a lab.
         adminPassword = var.grafana_admin_password
 
         persistence = {
@@ -129,15 +128,34 @@ resource "helm_release" "kube_prometheus_stack" {
           }
         }
 
-        # Inject the Keycloak client secret as an env var. Grafana's env-var
-        # override for generic_oauth.client_secret is named this specific way.
-        envValueFrom = {
-          GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET = {
-            secretKeyRef = {
-              name = kubernetes_secret_v1.grafana_oidc.metadata[0].name
-              key  = "client_secret"
-            }
-          }
+        # Vault Agent Injector: admin password and OIDC client secret come
+        # from Vault, written to /vault/secrets/* by the sidecar. Grafana's
+        # GF_*__FILE convention reads the values at startup.
+        podAnnotations = {
+          "vault.hashicorp.com/agent-inject" = "true"
+          "vault.hashicorp.com/role"         = "grafana"
+
+          "vault.hashicorp.com/agent-inject-secret-admin-password"   = "secret/data/grafana/admin"
+          "vault.hashicorp.com/agent-inject-template-admin-password" = <<-EOT
+            {{- with secret "secret/data/grafana/admin" -}}
+            {{ .Data.data.password }}
+            {{- end -}}
+          EOT
+
+          "vault.hashicorp.com/agent-inject-secret-oauth-client-secret"   = "secret/data/grafana/oidc"
+          "vault.hashicorp.com/agent-inject-template-oauth-client-secret" = <<-EOT
+            {{- with secret "secret/data/grafana/oidc" -}}
+            {{ .Data.data.client_secret }}
+            {{- end -}}
+          EOT
+        }
+
+        # GF_*__FILE (double underscore + FILE) reads the value from a path —
+        # overrides the plain GF_SECURITY_ADMIN_PASSWORD / GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET
+        # the chart injects from its own Secret.
+        env = {
+          GF_SECURITY_ADMIN_PASSWORD__FILE          = "/vault/secrets/admin-password"
+          GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET__FILE = "/vault/secrets/oauth-client-secret"
         }
 
         # Pre-declare the Tempo datasource via the sidecar (Tempo installed
@@ -207,7 +225,11 @@ resource "helm_release" "kube_prometheus_stack" {
     module.eks,
     helm_release.alb_controller, # avoid the webhook race we hit on cert-manager
     kubernetes_storage_class_v1.gp3,
-    kubernetes_secret_v1.grafana_oidc,
+    # Vault secrets must exist before the grafana pod rolls — agent-init
+    # fails the pod otherwise.
+    vault_kv_secret_v2.grafana_admin,
+    vault_kv_secret_v2.grafana_oidc,
+    vault_kubernetes_auth_backend_role.grafana,
   ]
 }
 
