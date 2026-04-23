@@ -74,8 +74,14 @@ resource "helm_release" "keycloak" {
   values = [
     yamlencode({
       auth = {
-        adminUser     = "admin"
-        adminPassword = var.keycloak_admin_password
+        adminUser = "admin"
+        # Admin password source of truth is Vault (secret/keycloak/admin).
+        # VSO syncs it into the keycloak-admin-auth Secret; chart reads the
+        # `admin-password` key (Bitnami default). As with Grafana, the
+        # password is persisted in Keycloak's DB on first boot, so rotating
+        # in Vault needs a matching UI/API change — delivery migration, not
+        # live rotation.
+        existingSecret = "keycloak-admin-auth"
       }
 
       # Bitnami's 2025 image-hosting shakeup: newer tags of docker.io/bitnami/keycloak
@@ -183,8 +189,10 @@ resource "helm_release" "keycloak" {
     helm_release.cert_manager,
     kubernetes_storage_class_v1.gp3,
     kubernetes_config_map_v1.keycloak_realm_import,
-    # Keycloak pod can't auth to Postgres without the VSO-synced Secret.
+    # Both VSO-synced Secrets must exist before Keycloak pod start — one
+    # for DB auth, one for master admin bootstrap.
     kubectl_manifest.keycloak_db_vault_secret,
+    kubectl_manifest.keycloak_admin_vault_secret,
   ]
 }
 

@@ -190,3 +190,15 @@ resource "vault_kv_secret_v2" "keycloak_db" {
     "postgres-password" = var.keycloak_db_password
   })
 }
+
+# Keycloak master admin password. Bitnami chart's auth.existingSecret reads
+# key "admin-password" by default. Same keycloak-db policy + vault auth role
+# covers this path since both are under secret/keycloak/*.
+resource "vault_kv_secret_v2" "keycloak_admin" {
+  mount = "secret"
+  name  = "keycloak/admin"
+
+  data_json = jsonencode({
+    "admin-password" = var.keycloak_admin_password
+  })
+}

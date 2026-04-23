@@ -59,3 +59,30 @@ resource "kubectl_manifest" "keycloak_db_vault_secret" {
     vault_kv_secret_v2.keycloak_db,
   ]
 }
+
+resource "kubectl_manifest" "keycloak_admin_vault_secret" {
+  yaml_body = yamlencode({
+    apiVersion = "secrets.hashicorp.com/v1beta1"
+    kind       = "VaultStaticSecret"
+    metadata = {
+      name      = "keycloak-admin"
+      namespace = kubernetes_namespace.keycloak.metadata[0].name
+    }
+    spec = {
+      vaultAuthRef = "keycloak-vault-auth"
+      mount        = "secret"
+      type         = "kv-v2"
+      path         = "keycloak/admin"
+      destination = {
+        name   = "keycloak-admin-auth"
+        create = true
+      }
+      refreshAfter = "60s"
+    }
+  })
+
+  depends_on = [
+    kubectl_manifest.keycloak_vault_auth,
+    vault_kv_secret_v2.keycloak_admin,
+  ]
+}
