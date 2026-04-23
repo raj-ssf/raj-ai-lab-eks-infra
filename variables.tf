@@ -139,3 +139,20 @@ variable "domain" {
     description = "Password for the Postgres 'keycloak' user backing Keycloak"
     sensitive   = true
   }
+
+  # --- Vault AppRole auth for Terraform itself ---
+  # Bootstrap is manual (one-time, after `vault operator init`). See
+  # vault-approle-bootstrap.sh for the script that creates the role and
+  # fetches these values. Export as TF_VAR_* each session.
+  variable "vault_terraform_role_id" {
+    type        = string
+    description = "Role ID of the Vault AppRole used by the terraform provider. Not a secret but scoped."
+    default     = ""
+  }
+
+  variable "vault_terraform_secret_id" {
+    type        = string
+    description = "Secret ID for the terraform AppRole. Sensitive — regenerate per session if you want short TTL."
+    sensitive   = true
+    default     = ""
+  }
