@@ -181,6 +181,23 @@ resource "vault_kubernetes_auth_backend_role" "keycloak_db" {
   token_policies                   = [vault_policy.keycloak_db.name]
 }
 
+# Separate role for the Keycloak pod itself — uses Agent Injector sidecar
+# to pull its DB password as a file. Keycloak 26 supports a `file:` prefix
+# on any config value, so KC_DB_PASSWORD=file:/vault/secrets/db-password
+# reads from the injected file. Two delivery mechanisms for the same
+# credential: VSO for Postgres (native k8s Secret via Bitnami chart's
+# auth.existingSecret), Agent Injector for Keycloak (file via Quarkus
+# config-source).
+resource "vault_kubernetes_auth_backend_role" "keycloak_pod" {
+  backend                          = "kubernetes"
+  role_name                        = "keycloak"
+  bound_service_account_names      = ["keycloak"]
+  bound_service_account_namespaces = ["keycloak"]
+  token_ttl                        = 3600
+  token_max_ttl                    = 86400
+  token_policies                   = [vault_policy.keycloak_db.name]
+}
+
 resource "vault_kv_secret_v2" "keycloak_db" {
   mount = "secret"
   name  = "keycloak/db"

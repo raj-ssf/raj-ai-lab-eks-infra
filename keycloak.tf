@@ -107,8 +107,14 @@ resource "helm_release" "keycloak" {
         port     = 5432
         user     = "keycloak"
         database = "keycloak"
-        # Same VSO-managed Secret as the postgres chart uses; override the
-        # key name to `password` so both charts read the same key.
+        # existingSecret satisfies Bitnami's upgrade safety check (chart
+        # refuses to render without a password source). Chart will set
+        # KC_DB_PASSWORD env from this Secret — but our extraEnvVars below
+        # re-declares KC_DB_PASSWORD with the `file:` prefix, and the
+        # later entry in the pod env list wins, so Keycloak actually reads
+        # from the Vault Agent–injected file. Net effect: same credential
+        # flows two ways through Helm to satisfy two constraints; runtime
+        # value is always the Vault Agent file.
         existingSecret            = "keycloak-db-auth"
         existingSecretPasswordKey = "password"
       }
@@ -122,13 +128,39 @@ resource "helm_release" "keycloak" {
       # Heap tuning + KC_HOSTNAME + health endpoint on management port 9000.
       # KC_HOSTNAME_STRICT=false lets us hit the pod via ClusterIP/port-forward
       # for debugging without tripping Keycloak's hostname check.
+      #
+      # KC_DB_PASSWORD uses Keycloak's `file:` config-source prefix, which
+      # reads the value at startup from the injected Vault Agent sidecar
+      # file. Applies to any KC_* option; this is Keycloak's equivalent of
+      # Grafana's GF_*__FILE convention.
       extraEnvVars = [
-        { name = "KC_HOSTNAME",          value = "keycloak.${var.domain}" },
-        { name = "KC_HOSTNAME_STRICT",   value = "false" },
-        { name = "KC_HTTP_ENABLED",      value = "true" },
-        { name = "KC_HEALTH_ENABLED",    value = "true" },
-        { name = "JAVA_OPTS_KC_HEAP",    value = "-Xms256m -Xmx512m" },
+        { name = "KC_HOSTNAME",       value = "keycloak.${var.domain}" },
+        { name = "KC_HOSTNAME_STRICT", value = "false" },
+        { name = "KC_HTTP_ENABLED",   value = "true" },
+        { name = "KC_HEALTH_ENABLED", value = "true" },
+        { name = "JAVA_OPTS_KC_HEAP", value = "-Xms256m -Xmx512m" },
+        { name = "KC_DB_PASSWORD",    value = "file:/vault/secrets/db-password" },
       ]
+
+      # Vault Agent Injector: writes /vault/secrets/db-password from
+      # secret/data/keycloak/db `password` key. Role `keycloak` is bound
+      # to keycloak/keycloak SA in vault-config.tf.
+      #
+      # Bitnami common chart runs tpl on every podAnnotations value, so raw
+      # Vault Agent template syntax trips Helm with `function "secret" not
+      # defined`. Wrap the template in {{` … `}} — Helm's raw-string escape
+      # — so tpl outputs the literal Vault Agent template string unchanged.
+      podAnnotations = {
+        "vault.hashicorp.com/agent-inject" = "true"
+        "vault.hashicorp.com/role"         = "keycloak"
+
+        "vault.hashicorp.com/agent-inject-secret-db-password"   = "secret/data/keycloak/db"
+        "vault.hashicorp.com/agent-inject-template-db-password" = <<-EOT
+          {{`{{- with secret "secret/data/keycloak/db" -}}
+          {{ .Data.data.password }}
+          {{- end -}}`}}
+        EOT
+      }
 
       # Realm import: mount the ConfigMap rendered by keycloak-realm.tf at the
       # dir Keycloak scans, and tell the startup script to import on boot.
@@ -189,10 +221,14 @@ resource "helm_release" "keycloak" {
     helm_release.cert_manager,
     kubernetes_storage_class_v1.gp3,
     kubernetes_config_map_v1.keycloak_realm_import,
-    # Both VSO-synced Secrets must exist before Keycloak pod start — one
-    # for DB auth, one for master admin bootstrap.
-    kubectl_manifest.keycloak_db_vault_secret,
+    # Admin password Secret must exist (VSO): bootstraps the master realm.
     kubectl_manifest.keycloak_admin_vault_secret,
+    # DB password role must exist (Agent Injector): pod can't auth Vault
+    # without it.
+    vault_kubernetes_auth_backend_role.keycloak_pod,
+    # DB password value must be in Vault KV so the agent can fetch it on
+    # pod boot (failing otherwise keeps pod in init forever).
+    vault_kv_secret_v2.keycloak_db,
   ]
 }
 
