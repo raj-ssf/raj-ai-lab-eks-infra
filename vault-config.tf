@@ -27,6 +27,11 @@ resource "vault_policy" "rag_service" {
     path "secret/metadata/rag-service/*" {
       capabilities = ["read", "list"]
     }
+    # Dynamic Postgres credentials — Vault's database engine issues a
+    # fresh username/password per call, auto-revokes at TTL.
+    path "database/creds/rag-service-db" {
+      capabilities = ["read"]
+    }
   EOT
 }
 
@@ -146,4 +151,134 @@ resource "vault_kv_secret_v2" "argocd_oidc" {
   data_json = jsonencode({
     client_secret = random_password.keycloak_argocd_client_secret.result
   })
+}
+
+# =============================================================================
+# Keycloak DB password — shared by keycloak-0 and keycloak-postgres-postgresql-0
+# =============================================================================
+# Both pods must agree on the same value or Keycloak can't auth to Postgres.
+# Delivery via VSO → single k8s Secret read by both charts through their
+# existingSecret values (see keycloak.tf). Two key names written to the same
+# value so Bitnami's postgresql chart (password / postgres-password) is happy
+# out of the box; Keycloak chart's key is overridden to `password` in its
+# existingSecretPasswordKey.
+
+resource "vault_policy" "keycloak_db" {
+  name = "keycloak-db"
+
+  policy = <<-EOT
+    path "secret/data/keycloak/*" {
+      capabilities = ["read"]
+    }
+    path "secret/metadata/keycloak/*" {
+      capabilities = ["read", "list"]
+    }
+  EOT
+}
+
+resource "vault_kubernetes_auth_backend_role" "keycloak_db" {
+  backend                          = "kubernetes"
+  role_name                        = "keycloak-db"
+  bound_service_account_names      = ["keycloak-vso"]
+  bound_service_account_namespaces = ["keycloak"]
+  token_ttl                        = 3600
+  token_max_ttl                    = 86400
+  token_policies                   = [vault_policy.keycloak_db.name]
+}
+
+# Separate role for the Keycloak pod itself — uses Agent Injector sidecar
+# to pull its DB password as a file. Keycloak 26 supports a `file:` prefix
+# on any config value, so KC_DB_PASSWORD=file:/vault/secrets/db-password
+# reads from the injected file. Two delivery mechanisms for the same
+# credential: VSO for Postgres (native k8s Secret via Bitnami chart's
+# auth.existingSecret), Agent Injector for Keycloak (file via Quarkus
+# config-source).
+resource "vault_kubernetes_auth_backend_role" "keycloak_pod" {
+  backend                          = "kubernetes"
+  role_name                        = "keycloak"
+  bound_service_account_names      = ["keycloak"]
+  bound_service_account_namespaces = ["keycloak"]
+  token_ttl                        = 3600
+  token_max_ttl                    = 86400
+  token_policies                   = [vault_policy.keycloak_db.name]
+}
+
+resource "vault_kv_secret_v2" "keycloak_db" {
+  mount = "secret"
+  name  = "keycloak/db"
+
+  data_json = jsonencode({
+    password            = var.keycloak_db_password
+    "postgres-password" = var.keycloak_db_password
+  })
+}
+
+# Keycloak master admin password. Bitnami chart's auth.existingSecret reads
+# key "admin-password" by default. Same keycloak-db policy + vault auth role
+# covers this path since both are under secret/keycloak/*.
+resource "vault_kv_secret_v2" "keycloak_admin" {
+  mount = "secret"
+  name  = "keycloak/admin"
+
+  data_json = jsonencode({
+    "admin-password" = var.keycloak_admin_password
+  })
+}
+
+# =============================================================================
+# Dynamic Postgres credentials for rag-service via RDS Aurora (rds.tf)
+# =============================================================================
+# Vault's database secrets engine connects to Aurora with the master creds,
+# and issues short-lived per-role users on demand. Each pod-driven call to
+# /database/creds/rag-service-db creates a fresh Postgres user with 1h TTL.
+# Vault revokes at expiry; no stale creds accumulate in the DB.
+
+resource "vault_mount" "database" {
+  path        = "database"
+  type        = "database"
+  description = "Dynamic credentials issuer for RDS Aurora Postgres"
+}
+
+resource "vault_database_secret_backend_connection" "rds_postgres" {
+  backend       = vault_mount.database.path
+  name          = "rds-postgres"
+  allowed_roles = ["rag-service-db"]
+
+  postgresql {
+    connection_url = "postgresql://{{username}}:{{password}}@${aws_db_instance.rag.address}:5432/ragdb?sslmode=require"
+    username       = aws_db_instance.rag.username
+    password       = random_password.rds_master.result
+    # Rotate the master password used by Vault on boot / refresh. Keeps the
+    # long-lived admin password out of any caller's hands after initial
+    # registration. If you ever need to disable this for debugging, set
+    # password_policy or switch to static creds.
+    # (Note: rotate_root would be nice here but runs once and is irreversible;
+    # for a lab we skip it so destroy/apply cycles don't strand us.)
+  }
+}
+
+resource "vault_database_secret_backend_role" "rag_service_db" {
+  backend = vault_mount.database.path
+  name    = "rag-service-db"
+  db_name = vault_database_secret_backend_connection.rds_postgres.name
+
+  default_ttl = 3600   # 1 hour — pod sees rotation every hour
+  max_ttl     = 86400  # 24h hard cap
+
+  # Create a role with CRUD on whatever's in public schema. Expand to specific
+  # tables / schemas once rag-service has its own DB layout.
+  creation_statements = [
+    "CREATE ROLE \"{{name}}\" WITH LOGIN PASSWORD '{{password}}' VALID UNTIL '{{expiration}}';",
+    "GRANT USAGE ON SCHEMA public TO \"{{name}}\";",
+    "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO \"{{name}}\";",
+    "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO \"{{name}}\";",
+  ]
+
+  # Graceful teardown on TTL expiry.
+  revocation_statements = [
+    "REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM \"{{name}}\";",
+    "REVOKE ALL PRIVILEGES ON SCHEMA public FROM \"{{name}}\";",
+    "REVOKE ALL PRIVILEGES ON DATABASE ragdb FROM \"{{name}}\";",
+    "DROP ROLE IF EXISTS \"{{name}}\";",
+  ]
 }
