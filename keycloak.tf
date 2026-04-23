@@ -31,10 +31,13 @@ resource "helm_release" "keycloak_postgres" {
         tag        = "17.6.0-debian-12-r4"
       }
       auth = {
-        username         = "keycloak"
-        database         = "keycloak"
-        password         = var.keycloak_db_password
-        postgresPassword = var.keycloak_db_password
+        username       = "keycloak"
+        database       = "keycloak"
+        # Password source of truth is Vault (secret/keycloak/db). VSO syncs
+        # that into the keycloak-db-auth k8s Secret in the keycloak ns; the
+        # chart's existingSecret pointer reads `password` + `postgres-password`
+        # from it. No plaintext passwords in helm values or tfstate.
+        existingSecret = "keycloak-db-auth"
       }
       primary = {
         persistence = {
@@ -54,6 +57,9 @@ resource "helm_release" "keycloak_postgres" {
   depends_on = [
     module.eks,
     kubernetes_storage_class_v1.gp3,
+    # VSO-managed Secret must exist before Postgres init — chart reads
+    # password from it for the initial DB bootstrap.
+    kubectl_manifest.keycloak_db_vault_secret,
   ]
 }
 
@@ -95,7 +101,10 @@ resource "helm_release" "keycloak" {
         port     = 5432
         user     = "keycloak"
         database = "keycloak"
-        password = var.keycloak_db_password
+        # Same VSO-managed Secret as the postgres chart uses; override the
+        # key name to `password` so both charts read the same key.
+        existingSecret            = "keycloak-db-auth"
+        existingSecretPasswordKey = "password"
       }
 
       # Production mode: strict checks, HTTP disabled unless explicitly enabled.
@@ -174,6 +183,8 @@ resource "helm_release" "keycloak" {
     helm_release.cert_manager,
     kubernetes_storage_class_v1.gp3,
     kubernetes_config_map_v1.keycloak_realm_import,
+    # Keycloak pod can't auth to Postgres without the VSO-synced Secret.
+    kubectl_manifest.keycloak_db_vault_secret,
   ]
 }
 

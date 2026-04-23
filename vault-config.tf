@@ -147,3 +147,46 @@ resource "vault_kv_secret_v2" "argocd_oidc" {
     client_secret = random_password.keycloak_argocd_client_secret.result
   })
 }
+
+# =============================================================================
+# Keycloak DB password — shared by keycloak-0 and keycloak-postgres-postgresql-0
+# =============================================================================
+# Both pods must agree on the same value or Keycloak can't auth to Postgres.
+# Delivery via VSO → single k8s Secret read by both charts through their
+# existingSecret values (see keycloak.tf). Two key names written to the same
+# value so Bitnami's postgresql chart (password / postgres-password) is happy
+# out of the box; Keycloak chart's key is overridden to `password` in its
+# existingSecretPasswordKey.
+
+resource "vault_policy" "keycloak_db" {
+  name = "keycloak-db"
+
+  policy = <<-EOT
+    path "secret/data/keycloak/*" {
+      capabilities = ["read"]
+    }
+    path "secret/metadata/keycloak/*" {
+      capabilities = ["read", "list"]
+    }
+  EOT
+}
+
+resource "vault_kubernetes_auth_backend_role" "keycloak_db" {
+  backend                          = "kubernetes"
+  role_name                        = "keycloak-db"
+  bound_service_account_names      = ["keycloak-vso"]
+  bound_service_account_namespaces = ["keycloak"]
+  token_ttl                        = 3600
+  token_max_ttl                    = 86400
+  token_policies                   = [vault_policy.keycloak_db.name]
+}
+
+resource "vault_kv_secret_v2" "keycloak_db" {
+  mount = "secret"
+  name  = "keycloak/db"
+
+  data_json = jsonencode({
+    password            = var.keycloak_db_password
+    "postgres-password" = var.keycloak_db_password
+  })
+}
