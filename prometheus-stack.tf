@@ -157,9 +157,9 @@ resource "helm_release" "kube_prometheus_stack" {
             client_id                  = "grafana"
             scopes                     = "openid profile email roles"
             empty_scopes               = false
-            auth_url                   = "https://keycloak.${var.domain}/realms/raj-ai-lab-eks/protocol/openid-connect/auth"
-            token_url                  = "https://keycloak.${var.domain}/realms/raj-ai-lab-eks/protocol/openid-connect/token"
-            api_url                    = "https://keycloak.${var.domain}/realms/raj-ai-lab-eks/protocol/openid-connect/userinfo"
+            auth_url                   = "https://keycloak.${var.domain}/realms/${var.cluster_name}/protocol/openid-connect/auth"
+            token_url                  = "https://keycloak.${var.domain}/realms/${var.cluster_name}/protocol/openid-connect/token"
+            api_url                    = "https://keycloak.${var.domain}/realms/${var.cluster_name}/protocol/openid-connect/userinfo"
             allow_sign_up              = true
             allow_assign_grafana_admin = true
             # Map the `roles` claim (Keycloak realm-role mapper) to Grafana
@@ -168,7 +168,7 @@ resource "helm_release" "kube_prometheus_stack" {
             role_attribute_path = "contains(roles[*], 'admin') && 'Admin' || contains(roles[*], 'editor') && 'Editor' || 'Viewer'"
             # After local sign-out, bounce through Keycloak's end-session
             # endpoint so the IdP session also ends.
-            signout_redirect_url = "https://keycloak.${var.domain}/realms/raj-ai-lab-eks/protocol/openid-connect/logout?post_logout_redirect_uri=https%3A%2F%2Fgrafana.${var.domain}%2Flogin"
+            signout_redirect_url = "https://keycloak.${var.domain}/realms/${var.cluster_name}/protocol/openid-connect/logout?post_logout_redirect_uri=https%3A%2F%2Fgrafana.${var.domain}%2Flogin"
           }
         }
 

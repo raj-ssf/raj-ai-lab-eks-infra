@@ -15,5 +15,6 @@ terraform {
     http       = { source = "hashicorp/http",       version = "~> 3.4" }
     random     = { source = "hashicorp/random",     version = "~> 3.6" }
     vault      = { source = "hashicorp/vault",      version = "~> 4.4" }
+    keycloak   = { source = "keycloak/keycloak",    version = "~> 5.0" }
   }
 }

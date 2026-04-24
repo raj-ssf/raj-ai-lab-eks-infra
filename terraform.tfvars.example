@@ -1,10 +1,55 @@
+# Copy to terraform.tfvars (gitignored) and fill in real values.
+# Keys marked REQUIRED have no default; apply will fail without them.
+# Keys under "Optional" have variable defaults — set only to override.
+
+# --- AWS plumbing (REQUIRED) --------------------------------------------------
 vpc_id             = "vpc-xxxxxxxxxxxxxxxxx"
 sso_admin_role_arn = "arn:aws:iam::<account-id>:role/aws-reserved/sso.amazonaws.com/<region>/AWSReservedSSO_<permission-set>_<suffix>"
 terraform_role_arn = "arn:aws:iam::<account-id>:role/<terraform-role-name>"
-domain     = "<your-apex-domain>"
-acme_email = "<your-email>"
+
+# --- DNS + ACME (REQUIRED) ----------------------------------------------------
+domain     = "<your-apex-domain>"            # e.g. "example.com"
+acme_email = "<your-email>"                  # Let's Encrypt registration + expiry alerts
+
+# --- ArgoCD source repo (REQUIRED) --------------------------------------------
 argocd_app_repo_url     = "git@github.com:<your-username>/<your-app-repo>.git"
 argocd_app_repo_ssh_key = "-----BEGIN OPENSSH PRIVATE KEY-----\n...\n-----END OPENSSH PRIVATE KEY-----"
+
+# --- GitHub Actions OIDC → AWS (REQUIRED) -------------------------------------
 gha_repo_owner = "<your-github-owner>"
 gha_repo_name  = "<your-app-repo>"
-grafana_admin_password = "<set-a-strong-password>"
+
+# --- Bootstrap admin passwords (REQUIRED) -------------------------------------
+# These are stateful-service bootstrap values (Grafana SQLite, Keycloak master
+# realm, Postgres user). First boot persists them internally; rotating via
+# Vault later alone won't propagate — needs service-level reset.
+# The keycloak TF provider also reads keycloak_admin_password at plan-time
+# for admin-API auth (Langfuse OIDC client creation).
+grafana_admin_password  = "<set-a-strong-password>"
+keycloak_admin_password = "<set-a-strong-password>"
+keycloak_db_password    = "<set-a-strong-password>"
+
+# --- Keycloak realm demo user (REQUIRED) --------------------------------------
+# email MUST match whatever email you create the Langfuse local-auth user with
+# — Langfuse's NextAuth account linking relies on exact email match to merge
+# the SSO identity with an existing local account.
+keycloak_demo_user_email      = "<user@example.com>"
+keycloak_demo_user_first_name = "<First>"
+keycloak_demo_user_last_name  = "<Last>"
+
+# --- Langfuse API keys (Optional; blank disables rag-service → Langfuse tracing)
+# Mint these from the Langfuse UI → Project Settings → API Keys, paste here.
+# langfuse_public_key = "pk-lf-..."
+# langfuse_secret_key = "sk-lf-..."
+
+# --- VPC subnet discovery (Optional; default "*Private*") ---------------------
+# Narrow enough to uniquely match YOUR VPC's private subnets. A too-loose
+# pattern matches other VPCs in the same account and Karpenter fails with
+# "Security group and subnet belong to different networks".
+# private_subnet_name_pattern = "<YourVPC>-Private_*"
+
+# --- Vault AppRole (Optional; for TF provider auth against Vault) -------------
+# Exported as TF_VAR_vault_terraform_{role_id,secret_id} each session.
+# See vault-approle-bootstrap.sh for the one-time generation script.
+# vault_terraform_role_id   = ""
+# vault_terraform_secret_id = ""

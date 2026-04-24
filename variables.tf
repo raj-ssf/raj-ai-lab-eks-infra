@@ -130,6 +130,14 @@ variable "domain" {
     description = "GitHub repo name containing the GHA workflow"
   }
 
+  # Bootstrap admin passwords — stateful services (Grafana, Keycloak, Postgres)
+  # persist these internally on first boot, so rotating via random_password +
+  # Vault alone does NOT propagate to the running service's own user record.
+  # Keep them in tfvars (gitignored) as the declarative bootstrap source.
+  # Additionally, keycloak_admin_password is consumed by the keycloak TF
+  # provider at plan-time for admin-API auth — can't be a random_password
+  # that only exists post-apply.
+
   variable "grafana_admin_password" {
     type        = string
     description = "Initial admin password for Grafana — rotate via UI once logged in"
@@ -138,7 +146,7 @@ variable "domain" {
 
   variable "keycloak_admin_password" {
     type        = string
-    description = "Bootstrap admin password for the Keycloak master realm"
+    description = "Bootstrap admin password for the Keycloak master realm. Also consumed by the keycloak TF provider for admin-API auth."
     sensitive   = true
   }
 
@@ -146,6 +154,26 @@ variable "domain" {
     type        = string
     description = "Password for the Postgres 'keycloak' user backing Keycloak"
     sensitive   = true
+  }
+
+  # Demo user identity for the Keycloak realm. Identifying values are sourced
+  # from terraform.tfvars (gitignored) rather than baked into the realm JSON
+  # in keycloak-realm.tf. The SSO-account-link into Langfuse matches by
+  # email, so keycloak_demo_user_email must match whatever email the
+  # Langfuse local-auth user was created with.
+  variable "keycloak_demo_user_email" {
+    type        = string
+    description = "Email for the Keycloak realm's demo user (must match the Langfuse local-auth user email for account linking to work)"
+  }
+
+  variable "keycloak_demo_user_first_name" {
+    type        = string
+    description = "First name for the Keycloak realm's demo user"
+  }
+
+  variable "keycloak_demo_user_last_name" {
+    type        = string
+    description = "Last name for the Keycloak realm's demo user"
   }
 
   # --- Langfuse API keys for rag-service --------------------------------------
