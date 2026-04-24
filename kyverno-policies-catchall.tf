@@ -44,7 +44,16 @@ locals {
     "docker.io/istio/*",           # Istio mesh sidecars + control plane
     "docker.io/bitnami/*",         # Bitnami charts (post-rename: see bitnamilegacy)
     "docker.io/bitnamilegacy/*",   # Bitnami charts on current version (Broadcom rename)
-    "hashicorp/vault*",            # Vault agent injector sidecar + server
+    # Vault agent injector sidecar + server. Permanent allowlist entry, not
+    # a stopgap: confirmed 2026-04-23 via `cosign verify` with fully permissive
+    # identity+issuer regex that docker.io/hashicorp/vault:1.18.x ships NO
+    # cosign signatures on Docker Hub (keyed or keyless). HashiCorp signs
+    # release binaries (GPG + SHA256SUMS) and signs some newer images in
+    # their JFrog registry, but not the Docker Hub tags we pull. Trust here
+    # is registry-level (Docker Hub account control + image digest pinning
+    # via our Helm values), not Sigstore-level. Revisit if HashiCorp ever
+    # starts signing their Docker Hub image tags.
+    "hashicorp/vault*",
     "qdrant/qdrant*",              # Qdrant vector DB
     "ghcr.io/dexidp/dex*",         # ArgoCD's bundled Dex IdP
     "public.ecr.aws/*",            # AWS public ECR (mirrors + EKS + official images)
