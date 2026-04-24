@@ -65,7 +65,13 @@ locals {
     #     project (Apache-2.0) and pinned by digest in our overlay.
     #   - amazon/aws-cli is AWS's official image, refreshed frequently,
     #     used only in an init container scoped to aws s3 sync into a PVC.
+    #
+    # Kyverno 'NotIn' is a literal-string glob — it does NOT canonicalize
+    # registry prefixes. A kustomize `images: [{name: vllm/vllm-openai}]`
+    # transform emits `vllm/vllm-openai:TAG` without `docker.io/`; so we
+    # list both forms to match whatever actually lands in the Pod spec.
     "docker.io/vllm/vllm-openai*",
+    "vllm/vllm-openai*",
     "amazon/aws-cli*",
   ]
 }

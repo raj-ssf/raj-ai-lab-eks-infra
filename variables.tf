@@ -58,9 +58,9 @@ variable "enable_gpu_node_group" {
 }
 
 variable "gpu_instance_type" {
-  description = "AWS GPU Instance Type"
+  description = "AWS GPU Instance Type. Default g5.12xlarge (4x A10G, 96 GB VRAM) fits Llama 3.3 70B AWQ with tensor-parallel-size=4. Downgrade to g5.xlarge (1x A10G) for ~24B models."
   type    = string
-  default = "g4dn.xlarge"
+  default = "g5.12xlarge"
 }
 
 variable "rds_instance_class" {
