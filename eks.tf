@@ -144,6 +144,12 @@ module "eks" {
         ami_type       = "AL2023_x86_64_NVIDIA"
         capacity_type  = "ON_DEMAND"
 
+        # Pin to a single AZ so the node lands in the same zone as the
+        # vllm-model-cache PVC's EBS volume. EBS is AZ-locked and a cross-AZ
+        # node can't mount a pre-existing PVC — pods stay Pending with
+        # 'didn't match PersistentVolume's node affinity'. See var.gpu_az.
+        subnet_ids = data.aws_subnets.gpu_az_private.ids
+
         desired_size = 1
         min_size     = 0
         # max_size=1 is intentional: on a 4-A10G cost-sensitive lab, we never

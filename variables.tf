@@ -63,6 +63,20 @@ variable "gpu_instance_type" {
   default = "g5.12xlarge"
 }
 
+variable "gpu_az" {
+  description = <<-EOT
+    AZ to pin the GPU node group into. Must match the AZ of the vllm model-cache
+    PVC's EBS volume — EBS is AZ-locked and a GPU node in a different AZ
+    can't mount it, which leaves the vllm pod Pending with 'didn't match
+    PersistentVolume's node affinity'. Currently us-west-2c because that's
+    where the PVC was last (re)provisioned. If the PVC ever gets recreated
+    in a different AZ (deleted + re-bound by a pod on a non-2c node),
+    update this to match.
+  EOT
+  type    = string
+  default = "us-west-2c"
+}
+
 variable "rds_instance_class" {
   description = "AWS RDS Instance Type"
   type    = string
