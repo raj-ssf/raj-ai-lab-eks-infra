@@ -146,6 +146,21 @@ resource "kubectl_manifest" "vllm_app" {
         server    = "https://kubernetes.default.svc"
         namespace = "llm"
       }
+      # Git declares `replicas: 0` on the vllm Deployment as the steady
+      # state (cost-off). Demo spin-up is `kubectl scale --replicas=1`.
+      # ignoreDifferences + RespectIgnoreDifferences=true tells ArgoCD's
+      # selfHeal loop to leave the live replica count alone — otherwise
+      # it would snap it back to 0 within seconds and the GPU node would
+      # never come up.
+      ignoreDifferences = [
+        {
+          group        = "apps"
+          kind         = "Deployment"
+          name         = "vllm"
+          namespace    = "llm"
+          jsonPointers = ["/spec/replicas"]
+        },
+      ]
       syncPolicy = {
         automated = {
           prune    = true
@@ -154,6 +169,7 @@ resource "kubectl_manifest" "vllm_app" {
         syncOptions = [
           "CreateNamespace=true",
           "PrunePropagationPolicy=foreground",
+          "RespectIgnoreDifferences=true",
         ]
       }
     }

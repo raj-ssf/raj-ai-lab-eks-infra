@@ -24,9 +24,15 @@ single `kubectl scale` command.
 
 ## Spin up
 
+Single command. Steady-state in git is `replicas: 0` on the vllm Deployment
+(raj-ai-lab-eks/llm/base/deployment.yaml) — no pods, no GPU node, no cost.
+The ArgoCD Application for vllm is wired with `ignoreDifferences` on
+`/spec/replicas` + `RespectIgnoreDifferences=true`, so manual `kubectl scale`
+is not reverted by selfHeal.
+
 ```bash
-# Scale vllm up. Karpenter sees the Pending nvidia.com/gpu-requesting pod
-# and provisions a GPU node in ~60-90 seconds.
+# Scale vllm up. Karpenter sees the Pending pod requesting
+# nvidia.com/gpu: 4 and provisions a GPU node in ~60-90 seconds.
 kubectl -n llm scale deployment vllm --replicas=1
 
 # Watch Karpenter's NodeClaim + actual node come up.
@@ -107,14 +113,11 @@ curl -s https://rag.ekstest.com/invoke \
 #    steady-state provider.
 kubectl set env deployment/rag-service -n rag LLM_PROVIDER=bedrock
 
-# 2. Scale vllm down. Karpenter detects the now-empty GPU node, consolidates
-#    after 30s, and terminates the EC2 instance. No terraform apply needed.
+# 2. Scale vllm down. Karpenter detects the now-empty GPU node and
+#    consolidates after 30s. Cost clock stops automatically.
 kubectl -n llm scale deployment vllm --replicas=0
 
-# 3. Verify the NodeClaim is gone after ~60s
-kubectl get nodeclaims
-
-# 4. Sanity — no g5/g6 instances in any billable state
+# 3. Sanity — no g5/g6 instances in any billable state
 aws ec2 describe-instances \
   --filters "Name=instance-type,Values=g5.12xlarge,g6.12xlarge" \
             "Name=instance-state-name,Values=running,pending,stopping,stopped" \

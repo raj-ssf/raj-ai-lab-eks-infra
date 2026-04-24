@@ -173,12 +173,17 @@ resource "kubectl_manifest" "karpenter_nodepool_gpu" {
         consolidationPolicy = "WhenEmptyOrUnderutilized"
         consolidateAfter    = "30s"
       }
-      # Hard cap: at most 2 × 48 vCPU GPU instances ever, total. Prevents
-      # runaway provisioning if something spawns a flood of pending pods.
+      # Hard upper bound on total capacity this NodePool can provision.
+      # Sized to allow 2 × 48 vCPU GPU boxes simultaneously, which is
+      # enough for one running demo + one rolling replacement. Prevents
+      # runaway provisioning if something mass-creates GPU-requesting
+      # pods. The real on/off toggle is the vllm Deployment's replica
+      # count in the app repo (raj-ai-lab-eks/llm/base/deployment.yaml,
+      # replicas=0 as steady state) — no pods requesting GPUs, no node.
       limits = {
-        cpu    = "96"      # 48 vCPU × 2 instances
-        memory = "400Gi"
-        "nvidia.com/gpu" = "8"  # 4 GPUs × 2 instances
+        cpu              = "96"    # 48 vCPU × 2 instances
+        memory           = "400Gi"
+        "nvidia.com/gpu" = "8"     # 4 GPUs × 2 instances
       }
     }
   })
