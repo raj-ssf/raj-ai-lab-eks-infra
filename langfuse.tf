@@ -81,6 +81,17 @@ resource "helm_release" "langfuse" {
 
   values = [
     yamlencode({
+      # Bitnami's post-Aug-2025 subcharts refuse to deploy with overridden
+      # image repos (including their own bitnamilegacy/* paths) unless you
+      # set this flag. Not an actual security concern for a lab — it's a
+      # nag guard steering users toward the paid "Bitnami Secure" catalog.
+      # See https://github.com/bitnami/charts/issues/30850.
+      global = {
+        security = {
+          allowInsecureImages = true
+        }
+      }
+
       langfuse = {
         salt = {
           value = random_password.langfuse_salt.result
@@ -129,17 +140,29 @@ resource "helm_release" "langfuse" {
               paths = [{ path = "/", pathType = "Prefix" }]
             },
           ]
-          tls = [{
-            hosts      = ["langfuse.${var.domain}"]
+          tls = {
+            enabled    = true
             secretName = "langfuse-tls"
-          }]
+          }
         }
       }
 
       # --- Bundled subcharts --------------------------------------------------
 
+      # NOTE on image repos: Bitnami's August-2025 catalog shake-up moved all
+      # existing non-"secure" tags from docker.io/bitnami/* to docker.io/
+      # bitnamilegacy/*. The Langfuse chart's subchart values still reference
+      # bitnami/* by default — pulls 404 / ImagePullBackOff with the chart's
+      # default image paths. Overriding each subchart's image.repository to
+      # the bitnamilegacy/* path is the standard fix; tags stay the same.
+      # (Same fix we applied earlier for the keycloak-postgres-postgresql
+      # pod, documented in project_eks_lab_progress.md.)
+
       postgresql = {
         deploy = true
+        image = {
+          repository = "bitnamilegacy/postgresql"
+        }
         auth = {
           password         = random_password.langfuse_pg_password.result
           postgresPassword = random_password.langfuse_pg_password.result
@@ -158,6 +181,9 @@ resource "helm_release" "langfuse" {
 
       clickhouse = {
         deploy = true
+        image = {
+          repository = "bitnamilegacy/clickhouse"
+        }
         auth = {
           password = random_password.langfuse_clickhouse_password.result
         }
@@ -170,6 +196,9 @@ resource "helm_release" "langfuse" {
           size    = "20Gi"  # Traces compound fast; 20 GiB covers months of lab use.
         }
         zookeeper = {
+          image = {
+            repository = "bitnamilegacy/zookeeper"
+          }
           # ClickHouse Keeper replaces ZooKeeper in newer images, but the
           # Bitnami chart still ships ZK as default. Single replica for lab.
           replicaCount = 1
@@ -186,6 +215,11 @@ resource "helm_release" "langfuse" {
 
       redis = {
         deploy = true
+        # Bitnami renamed Redis to Valkey in their catalog; chart still calls
+        # it 'redis' as the subchart key but pulls the valkey image.
+        image = {
+          repository = "bitnamilegacy/valkey"
+        }
         auth = {
           password = random_password.langfuse_redis_password.result
         }
@@ -203,6 +237,9 @@ resource "helm_release" "langfuse" {
 
       s3 = {
         deploy = true
+        image = {
+          repository = "bitnamilegacy/minio"
+        }
         auth = {
           rootPassword = random_password.langfuse_minio_password.result
         }
