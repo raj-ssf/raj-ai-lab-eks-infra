@@ -154,9 +154,14 @@ resource "kubectl_manifest" "vllm_app" {
       # back to 0 within seconds and the GPU node would never come up.
       #
       # One entry per Deployment (the match tuple is GVK + name +
-      # namespace). The first is the default demo path; the five
-      # `vllm-*` entries cover the hardware-test variants defined in
-      # llm/base/deployment-variants.yaml.
+      # namespace). Grouped as:
+      #   - `vllm`              — default demo path (70B AWQ on g5/g6)
+      #   - `vllm-<hardware>`   — hardware-test variants (same 70B AWQ
+      #                           across different GPU families); see
+      #                           llm/base/deployment-variants.yaml
+      #   - `vllm-<model>`      — model-test variants (different
+      #                           models on their optimal hardware);
+      #                           see llm/base/deployment-models.yaml
       ignoreDifferences = [
         {
           group        = "apps"
@@ -197,6 +202,34 @@ resource "kubectl_manifest" "vllm_app" {
           group        = "apps"
           kind         = "Deployment"
           name         = "vllm-p5-8gpu"
+          namespace    = "llm"
+          jsonPointers = ["/spec/replicas"]
+        },
+        {
+          group        = "apps"
+          kind         = "Deployment"
+          name         = "vllm-llama-8b"
+          namespace    = "llm"
+          jsonPointers = ["/spec/replicas"]
+        },
+        {
+          group        = "apps"
+          kind         = "Deployment"
+          name         = "vllm-mixtral-8x7b"
+          namespace    = "llm"
+          jsonPointers = ["/spec/replicas"]
+        },
+        {
+          group        = "apps"
+          kind         = "Deployment"
+          name         = "vllm-llama-vision-11b"
+          namespace    = "llm"
+          jsonPointers = ["/spec/replicas"]
+        },
+        {
+          group        = "apps"
+          kind         = "Deployment"
+          name         = "vllm-llama-405b"
           namespace    = "llm"
           jsonPointers = ["/spec/replicas"]
         },
