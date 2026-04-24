@@ -154,6 +154,23 @@ variable "domain" {
     sensitive   = true
   }
 
+  # --- Langfuse API keys for rag-service --------------------------------------
+  # Minted once in the Langfuse UI (Settings → API Keys → Create New Key) and
+  # pasted into terraform.tfvars. Public key is safe to commit (prefix 'pk-lf-')
+  # but kept in tfvars alongside the secret for operational simplicity.
+  variable "langfuse_public_key" {
+    type        = string
+    description = "Langfuse public key (pk-lf-...) minted in the Langfuse UI project settings"
+    default     = ""
+  }
+
+  variable "langfuse_secret_key" {
+    type        = string
+    description = "Langfuse secret key (sk-lf-...) minted in the Langfuse UI project settings"
+    sensitive   = true
+    default     = ""
+  }
+
   # --- Vault AppRole auth for Terraform itself ---
   # Bootstrap is manual (one-time, after `vault operator init`). See
   # vault-approle-bootstrap.sh for the script that creates the role and
