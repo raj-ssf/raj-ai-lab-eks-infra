@@ -192,3 +192,125 @@ resource "kubectl_manifest" "karpenter_nodepool_gpu" {
     kubectl_manifest.karpenter_ec2nc_gpu,
   ]
 }
+
+# gpu-experiments NodePool — opt-in hardware comparison sandbox.
+#
+# Distinct from the default `gpu` NodePool so Karpenter's cheapest-pick
+# logic can't silently route the main llm.ekstest.com demo onto an
+# exotic instance type (e.g. a g4dn.12xlarge at $3.91/hr would beat
+# g6.12xlarge on price but AWQ inference is slow on Turing's non-INT4
+# tensor cores). Opt-in is gated by a distinct taint (`gpu-experiment`)
+# — only pods that explicitly tolerate it land here.
+#
+# Shares EC2NodeClass `gpu` (same AMI, disk, role, subnets, SGs). All
+# instance types in the allow-list are amd64 EKS-NVIDIA compatible.
+# AZ-pinned to us-west-2c to match the vllm-model-cache PVC zone; the
+# variant Deployments all share the same PVC + 70B AWQ weights for
+# apples-to-apples hardware comparison.
+#
+# Limits sized for exactly ONE p5.48xlarge (the largest allowed
+# instance) at a time. gpu=8 is the authoritative safety cap — any
+# mix totalling 8 GPUs is fine, but blocks simultaneous p5 + p4d.
+# Designed for sequential testing ("scale one up, test, scale down,
+# pick the next"), not parallel runs.
+resource "kubectl_manifest" "karpenter_nodepool_gpu_experiments" {
+  yaml_body = yamlencode({
+    apiVersion = "karpenter.sh/v1"
+    kind       = "NodePool"
+    metadata = {
+      name = "gpu-experiments"
+    }
+    spec = {
+      template = {
+        metadata = {
+          labels = {
+            workload                 = "gpu-experiment"
+            "nvidia.com/gpu"         = "true"
+            "nvidia.com/gpu.present" = "true"
+          }
+        }
+        spec = {
+          nodeClassRef = {
+            group = "karpenter.k8s.aws"
+            kind  = "EC2NodeClass"
+            name  = "gpu"
+          }
+          # Dual taint: same `nvidia.com/gpu` taint as the default pool
+          # (so existing GPU-tolerant pod specs still work), plus the
+          # `gpu-experiment` taint that only variant Deployments
+          # tolerate. This keeps the default `vllm` Deployment out of
+          # this pool — it tolerates nvidia.com/gpu but not
+          # gpu-experiment, so it cannot schedule on an experiment node.
+          taints = [
+            {
+              key    = "nvidia.com/gpu"
+              value  = "true"
+              effect = "NoSchedule"
+            },
+            {
+              key    = "gpu-experiment"
+              value  = "true"
+              effect = "NoSchedule"
+            },
+          ]
+          requirements = [
+            {
+              key      = "node.kubernetes.io/instance-type"
+              operator = "In"
+              values = [
+                # 4-GPU perf-floor baseline — AWQ marlin kernel may
+                # fall back to the triton path on Turing (no INT4
+                # tensor cores). Interesting data-point either way.
+                "g4dn.12xlarge",   # 4× T4 16GB (Turing)
+                # 1-GPU cheapest single-GPU path for quantized 70B.
+                # Requires --tensor-parallel-size=1.
+                "g6e.xlarge",      # 1× L40S 48GB (Ada)
+                # 4-GPU Ada with 2× VRAM of g6 — room for unquantized
+                # 70B FP16 comparison if desired.
+                "g6e.12xlarge",    # 4× L40S 48GB (Ada)
+                # Classic datacenter GPU. NVSwitch-backed TP=8.
+                "p4d.24xlarge",    # 8× A100 40GB (Ampere)
+                # Portfolio-flex option. Hopper + NVSwitch + 3.2 Tbps
+                # EFA. Overkill for inference but impressive headline.
+                "p5.48xlarge",     # 8× H100 80GB (Hopper)
+              ]
+            },
+            {
+              key      = "karpenter.sh/capacity-type"
+              operator = "In"
+              values   = ["on-demand"]
+            },
+            {
+              # AZ pin matches vllm-model-cache PVC's EBS zone.
+              key      = "topology.kubernetes.io/zone"
+              operator = "In"
+              values   = ["us-west-2c"]
+            },
+            {
+              key      = "kubernetes.io/arch"
+              operator = "In"
+              values   = ["amd64"]
+            },
+          ]
+          # 24h vs the default pool's 30d — experiment nodes recycle
+          # within a day even if left running. Cheap safety against
+          # an accidental sustained run on a $98/hr p5.48xlarge.
+          expireAfter = "24h"
+        }
+      }
+      disruption = {
+        consolidationPolicy = "WhenEmptyOrUnderutilized"
+        consolidateAfter    = "30s"
+      }
+      limits = {
+        cpu              = "192"     # p5.48xlarge = 192 vCPU
+        memory           = "2048Gi"  # p5.48xlarge = 2 TiB RAM
+        "nvidia.com/gpu" = "8"
+      }
+    }
+  })
+
+  depends_on = [
+    kubectl_manifest.karpenter_ec2nc_gpu,
+  ]
+}

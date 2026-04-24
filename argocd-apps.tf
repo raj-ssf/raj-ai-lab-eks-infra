@@ -146,17 +146,57 @@ resource "kubectl_manifest" "vllm_app" {
         server    = "https://kubernetes.default.svc"
         namespace = "llm"
       }
-      # Git declares `replicas: 0` on the vllm Deployment as the steady
-      # state (cost-off). Demo spin-up is `kubectl scale --replicas=1`.
-      # ignoreDifferences + RespectIgnoreDifferences=true tells ArgoCD's
-      # selfHeal loop to leave the live replica count alone — otherwise
-      # it would snap it back to 0 within seconds and the GPU node would
-      # never come up.
+      # Git declares `replicas: 0` on every vllm* Deployment as the
+      # steady state (cost-off). Demo/test spin-up is
+      # `kubectl scale --replicas=1`. ignoreDifferences +
+      # RespectIgnoreDifferences=true tells ArgoCD's selfHeal loop to
+      # leave the live replica count alone — otherwise it would snap it
+      # back to 0 within seconds and the GPU node would never come up.
+      #
+      # One entry per Deployment (the match tuple is GVK + name +
+      # namespace). The first is the default demo path; the five
+      # `vllm-*` entries cover the hardware-test variants defined in
+      # llm/base/deployment-variants.yaml.
       ignoreDifferences = [
         {
           group        = "apps"
           kind         = "Deployment"
           name         = "vllm"
+          namespace    = "llm"
+          jsonPointers = ["/spec/replicas"]
+        },
+        {
+          group        = "apps"
+          kind         = "Deployment"
+          name         = "vllm-g4dn-4gpu"
+          namespace    = "llm"
+          jsonPointers = ["/spec/replicas"]
+        },
+        {
+          group        = "apps"
+          kind         = "Deployment"
+          name         = "vllm-g6e-1gpu"
+          namespace    = "llm"
+          jsonPointers = ["/spec/replicas"]
+        },
+        {
+          group        = "apps"
+          kind         = "Deployment"
+          name         = "vllm-g6e-4gpu"
+          namespace    = "llm"
+          jsonPointers = ["/spec/replicas"]
+        },
+        {
+          group        = "apps"
+          kind         = "Deployment"
+          name         = "vllm-p4d-8gpu"
+          namespace    = "llm"
+          jsonPointers = ["/spec/replicas"]
+        },
+        {
+          group        = "apps"
+          kind         = "Deployment"
+          name         = "vllm-p5-8gpu"
           namespace    = "llm"
           jsonPointers = ["/spec/replicas"]
         },
