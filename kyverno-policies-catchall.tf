@@ -73,6 +73,18 @@ locals {
     "docker.io/vllm/vllm-openai*",
     "vllm/vllm-openai*",
     "amazon/aws-cli*",
+
+    # Langfuse stack (langfuse namespace). Main images are langfuse/langfuse
+    # and langfuse/langfuse-worker on Docker Hub — unsigned (standard for
+    # open-source Apache-2.0 projects today). Trust is registry-level +
+    # chart-version pin. Bundled backends (postgres, clickhouse, zookeeper,
+    # redis, minio) all ship as docker.io/bitnami/* which is already on
+    # the allowlist. Same both-prefix-forms rule as vllm — kustomize would
+    # emit bare names, so both registry-qualified and bare are listed.
+    "docker.io/langfuse/langfuse*",
+    "langfuse/langfuse*",
+    "docker.io/langfuse/langfuse-worker*",
+    "langfuse/langfuse-worker*",
   ]
 }
 
@@ -105,7 +117,7 @@ resource "kubectl_manifest" "kyverno_deny_unverified_images" {
               {
                 resources = {
                   kinds      = ["Pod"]
-                  namespaces = ["rag", "qdrant", "keycloak", "argocd", "llm"]
+                  namespaces = ["rag", "qdrant", "keycloak", "argocd", "llm", "langfuse"]
                   # CREATE only — same rationale as verify-rag-service-image-signature:
                   # UPDATE operations on existing Deployments for unrelated fields
                   # (e.g. replica count patches) shouldn't be blocked by container-spec
