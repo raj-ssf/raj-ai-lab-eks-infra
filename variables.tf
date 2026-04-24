@@ -58,9 +58,23 @@ variable "enable_gpu_node_group" {
 }
 
 variable "gpu_instance_type" {
-  description = "AWS GPU Instance Type"
+  description = "AWS GPU Instance Type. Default g5.12xlarge (4x A10G, 96 GB VRAM) fits Llama 3.3 70B AWQ with tensor-parallel-size=4. Downgrade to g5.xlarge (1x A10G) for ~24B models."
   type    = string
-  default = "g4dn.xlarge"
+  default = "g5.12xlarge"
+}
+
+variable "gpu_az" {
+  description = <<-EOT
+    AZ to pin the GPU node group into. Must match the AZ of the vllm model-cache
+    PVC's EBS volume — EBS is AZ-locked and a GPU node in a different AZ
+    can't mount it, which leaves the vllm pod Pending with 'didn't match
+    PersistentVolume's node affinity'. Currently us-west-2c because that's
+    where the PVC was last (re)provisioned. If the PVC ever gets recreated
+    in a different AZ (deleted + re-bound by a pod on a non-2c node),
+    update this to match.
+  EOT
+  type    = string
+  default = "us-west-2c"
 }
 
 variable "rds_instance_class" {
@@ -138,6 +152,23 @@ variable "domain" {
     type        = string
     description = "Password for the Postgres 'keycloak' user backing Keycloak"
     sensitive   = true
+  }
+
+  # --- Langfuse API keys for rag-service --------------------------------------
+  # Minted once in the Langfuse UI (Settings → API Keys → Create New Key) and
+  # pasted into terraform.tfvars. Public key is safe to commit (prefix 'pk-lf-')
+  # but kept in tfvars alongside the secret for operational simplicity.
+  variable "langfuse_public_key" {
+    type        = string
+    description = "Langfuse public key (pk-lf-...) minted in the Langfuse UI project settings"
+    default     = ""
+  }
+
+  variable "langfuse_secret_key" {
+    type        = string
+    description = "Langfuse secret key (sk-lf-...) minted in the Langfuse UI project settings"
+    sensitive   = true
+    default     = ""
   }
 
   # --- Vault AppRole auth for Terraform itself ---

@@ -144,15 +144,61 @@ module "eks" {
         ami_type       = "AL2023_x86_64_NVIDIA"
         capacity_type  = "ON_DEMAND"
 
+        # Pin to a single AZ so the node lands in the same zone as the
+        # vllm-model-cache PVC's EBS volume. EBS is AZ-locked and a cross-AZ
+        # node can't mount a pre-existing PVC — pods stay Pending with
+        # 'didn't match PersistentVolume's node affinity'. See var.gpu_az.
+        subnet_ids = data.aws_subnets.gpu_az_private.ids
+
         desired_size = 1
         min_size     = 0
-        max_size     = 2
+        # max_size=1 is intentional: on a 4-A10G cost-sensitive lab, we never
+        # want the managed nodegroup to burst above 1 instance during a
+        # rolling update. Earlier (2026-04-24) an eks.tf edit triggered a
+        # runaway replacement loop — launch-template version bumps caused
+        # overlapping rolls that bursted to 11 tracked + ~18 cycled
+        # instances before Ctrl-C + manual cleanup. Capping max_size=1
+        # means any future LT change will terminate-then-launch (with
+        # vllm downtime during replacement) rather than burst-then-drain.
+        # That's the right tradeoff for a lab running on-demand compute.
+        max_size = 1
 
-        disk_size = 100
+        # Root disk sized via block_device_mappings only. DO NOT also set
+        # `disk_size` at the same level — that's the footgun from the
+        # 2026-04-24 incident. The EKS module emits one LT param for each
+        # and the drift resolution between them triggers cascading LT
+        # versions → cascading rolls. block_device_mappings is the more
+        # expressive form (volume_type/encrypted/throughput control) so
+        # it's the one to keep.
+        #
+        # Sizing rationale — 200 GiB root:
+        #   AL2023_x86_64_NVIDIA OS + drivers + CUDA libs consume ~25 GiB.
+        #   containerd's extraction of vllm/vllm-openai (~15 GiB compressed,
+        #   ~40 GiB extracted in overlayfs) needs transient headroom.
+        #   100 GiB blew kubelet's eviction threshold mid-pull. 200 GiB
+        #   leaves comfortable margin for the image + logs + any future
+        #   add-ons (DCGM exporter, etc.).
+        block_device_mappings = {
+          xvda = {
+            device_name = "/dev/xvda"
+            ebs = {
+              volume_size           = 200
+              volume_type           = "gp3"
+              encrypted             = true
+              delete_on_termination = true
+            }
+          }
+        }
 
         labels = {
-          workload      = "gpu"
-          "nvidia.com/gpu" = "true"
+          workload              = "gpu"
+          "nvidia.com/gpu"      = "true"
+          # NVIDIA-GPU-Operator convention label; we're not running the
+          # Operator (AL2023_x86_64_NVIDIA AMI + device plugin is enough
+          # for this lab) but the label key is what nodeSelectors target
+          # across the industry — matches the vllm Deployment in the app
+          # repo without a bespoke label.
+          "nvidia.com/gpu.present" = "true"
         }
 
         taints = [{

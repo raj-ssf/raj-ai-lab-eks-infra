@@ -57,6 +57,34 @@ locals {
     "qdrant/qdrant*",              # Qdrant vector DB
     "ghcr.io/dexidp/dex*",         # ArgoCD's bundled Dex IdP
     "public.ecr.aws/*",            # AWS public ECR (mirrors + EKS + official images)
+
+    # vLLM serving stack (llm namespace). Pre-flight 2026-04-23: neither
+    # docker.io/vllm/vllm-openai nor amazon/aws-cli publish cosign
+    # signatures on Docker Hub. Trust here is registry-level:
+    #   - vllm/vllm-openai is the official upstream build from the vLLM
+    #     project (Apache-2.0) and pinned by digest in our overlay.
+    #   - amazon/aws-cli is AWS's official image, refreshed frequently,
+    #     used only in an init container scoped to aws s3 sync into a PVC.
+    #
+    # Kyverno 'NotIn' is a literal-string glob — it does NOT canonicalize
+    # registry prefixes. A kustomize `images: [{name: vllm/vllm-openai}]`
+    # transform emits `vllm/vllm-openai:TAG` without `docker.io/`; so we
+    # list both forms to match whatever actually lands in the Pod spec.
+    "docker.io/vllm/vllm-openai*",
+    "vllm/vllm-openai*",
+    "amazon/aws-cli*",
+
+    # Langfuse stack (langfuse namespace). Main images are langfuse/langfuse
+    # and langfuse/langfuse-worker on Docker Hub — unsigned (standard for
+    # open-source Apache-2.0 projects today). Trust is registry-level +
+    # chart-version pin. Bundled backends (postgres, clickhouse, zookeeper,
+    # redis, minio) all ship as docker.io/bitnami/* which is already on
+    # the allowlist. Same both-prefix-forms rule as vllm — kustomize would
+    # emit bare names, so both registry-qualified and bare are listed.
+    "docker.io/langfuse/langfuse*",
+    "langfuse/langfuse*",
+    "docker.io/langfuse/langfuse-worker*",
+    "langfuse/langfuse-worker*",
   ]
 }
 
@@ -89,7 +117,7 @@ resource "kubectl_manifest" "kyverno_deny_unverified_images" {
               {
                 resources = {
                   kinds      = ["Pod"]
-                  namespaces = ["rag", "qdrant", "keycloak", "argocd"]
+                  namespaces = ["rag", "qdrant", "keycloak", "argocd", "llm", "langfuse"]
                   # CREATE only — same rationale as verify-rag-service-image-signature:
                   # UPDATE operations on existing Deployments for unrelated fields
                   # (e.g. replica count patches) shouldn't be blocked by container-spec

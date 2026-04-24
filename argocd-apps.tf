@@ -102,6 +102,69 @@ resource "kubectl_manifest" "rag_service_app" {
   ]
 }
 
+resource "kubectl_manifest" "vllm_app" {
+  yaml_body = yamlencode({
+    apiVersion = "argoproj.io/v1alpha1"
+    kind       = "Application"
+    metadata = {
+      name      = "vllm"
+      namespace = kubernetes_namespace.argocd.metadata[0].name
+      finalizers = [
+        "resources-finalizer.argocd.argoproj.io",
+      ]
+    }
+    spec = {
+      project = "default"
+      source = {
+        repoURL        = var.argocd_app_repo_url
+        targetRevision = "HEAD"
+        path           = "llm/overlays/dev"
+
+        # Env-specific Ingress host injected here (same pattern as rag-service).
+        # Pod Identity binding for the vllm SA lives in model-weights.tf — no
+        # annotation patch on the SA needed.
+        kustomize = {
+          patches = [
+            {
+              target = {
+                kind = "Ingress"
+                name = "vllm"
+              }
+              patch = <<-EOT
+                - op: replace
+                  path: /spec/tls/0/hosts/0
+                  value: llm.${var.domain}
+                - op: replace
+                  path: /spec/rules/0/host
+                  value: llm.${var.domain}
+              EOT
+            },
+          ]
+        }
+      }
+      destination = {
+        server    = "https://kubernetes.default.svc"
+        namespace = "llm"
+      }
+      syncPolicy = {
+        automated = {
+          prune    = true
+          selfHeal = true
+        }
+        syncOptions = [
+          "CreateNamespace=true",
+          "PrunePropagationPolicy=foreground",
+        ]
+      }
+    }
+  })
+
+  depends_on = [
+    helm_release.argocd,
+    kubernetes_secret.argocd_app_repo,
+  ]
+}
+
 resource "kubectl_manifest" "qdrant_app" {
   yaml_body = yamlencode({
     apiVersion = "argoproj.io/v1alpha1"

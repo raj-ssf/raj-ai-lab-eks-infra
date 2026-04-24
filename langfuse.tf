@@ -1,0 +1,268 @@
+# Langfuse — LLM observability UI (prompts, traces, costs, evals).
+# Complements Tempo (which holds the low-level distributed traces) by
+# providing an LLM-specific view: prompt text, response text, token usage,
+# latency per step, score annotations, prompt-vs-response diffs.
+#
+# Deployment shape (first pass — v3 with bundled backends):
+#   - One Helm release installs the Langfuse chart + 4 stateful subcharts
+#     (Bitnami postgres, ClickHouse, Redis, MinIO). Self-contained for the
+#     lab; migrate to external-managed later if durability is a concern.
+#   - Local auth only for now. OIDC via Keycloak is a follow-up milestone
+#     (needs a Keycloak realm client + two env vars on the web pod).
+#   - Ingress langfuse.ekstest.com with cert-manager letsencrypt-prod, same
+#     pattern as rag + llm.
+#
+# Secrets: three required bootstrap values (salt, encryption key, nextauth
+# secret). Generated once by Terraform via random_* resources — stored in
+# state (which is S3+encrypted). Not rotating these on apply is critical:
+# if encryption_key changes, Langfuse loses access to any already-stored
+# encrypted API keys.
+
+resource "kubernetes_namespace" "langfuse" {
+  metadata {
+    name = "langfuse"
+  }
+}
+
+# --- Bootstrap secrets -------------------------------------------------------
+
+# Salt used for hashing API keys. 32 bytes, base64-encoded.
+resource "random_password" "langfuse_salt" {
+  length  = 44
+  special = false
+}
+
+# Data encryption key. Langfuse expects a 64-char hex string (32 raw bytes).
+resource "random_id" "langfuse_encryption_key" {
+  byte_length = 32
+}
+
+# NextAuth session JWT secret. 32+ chars, any charset.
+resource "random_password" "langfuse_nextauth_secret" {
+  length  = 44
+  special = false
+}
+
+# Passwords for the bundled subcharts — keep them as random Terraform-managed
+# values so they survive Helm upgrades without the chart rotating them.
+resource "random_password" "langfuse_pg_password" {
+  length  = 32
+  special = false
+}
+
+resource "random_password" "langfuse_clickhouse_password" {
+  length  = 32
+  special = false
+}
+
+resource "random_password" "langfuse_redis_password" {
+  length  = 32
+  special = false
+}
+
+resource "random_password" "langfuse_minio_password" {
+  length  = 32
+  special = false
+}
+
+# --- Helm release ------------------------------------------------------------
+
+resource "helm_release" "langfuse" {
+  name       = "langfuse"
+  namespace  = kubernetes_namespace.langfuse.metadata[0].name
+  repository = "https://langfuse.github.io/langfuse-k8s"
+  chart      = "langfuse"
+  # Pin — bump deliberately. Chart version ≠ app version; v1.x of the chart
+  # installs Langfuse v3.x (the "three-backend" architecture: pg + clickhouse
+  # + redis). Older v0.x chart versions installed Langfuse v2 (pg-only).
+  version = "1.0.0"
+
+  timeout = 600  # ClickHouse init is slow on first install; give it room.
+
+  values = [
+    yamlencode({
+      # Bitnami's post-Aug-2025 subcharts refuse to deploy with overridden
+      # image repos (including their own bitnamilegacy/* paths) unless you
+      # set this flag. Not an actual security concern for a lab — it's a
+      # nag guard steering users toward the paid "Bitnami Secure" catalog.
+      # See https://github.com/bitnami/charts/issues/30850.
+      global = {
+        security = {
+          allowInsecureImages = true
+        }
+      }
+
+      langfuse = {
+        salt = {
+          value = random_password.langfuse_salt.result
+        }
+        encryptionKey = {
+          value = random_id.langfuse_encryption_key.hex
+        }
+        nextauth = {
+          secret = {
+            value = random_password.langfuse_nextauth_secret.result
+          }
+          url = "https://langfuse.${var.domain}"
+        }
+        # Local auth only for now. OIDC via Keycloak is a follow-up.
+        # auth = { providers = { ... } }
+
+        # Web tier (Next.js frontend + API).
+        web = {
+          replicas = 1
+          resources = {
+            requests = { cpu = "200m", memory = "512Mi" }
+            limits   = { cpu = "1000m", memory = "1Gi" }
+          }
+        }
+
+        # Worker tier (async event ingestion → ClickHouse).
+        worker = {
+          replicas = 1
+          resources = {
+            requests = { cpu = "200m", memory = "512Mi" }
+            limits   = { cpu = "1000m", memory = "1Gi" }
+          }
+        }
+
+        ingress = {
+          enabled   = true
+          className = "nginx"
+          annotations = {
+            "cert-manager.io/cluster-issuer" = "letsencrypt-prod"
+            # Traces can be bulky — bump body limit like we did for vllm.
+            "nginx.ingress.kubernetes.io/proxy-body-size" = "32m"
+          }
+          hosts = [
+            {
+              host = "langfuse.${var.domain}"
+              paths = [{ path = "/", pathType = "Prefix" }]
+            },
+          ]
+          tls = {
+            enabled    = true
+            secretName = "langfuse-tls"
+          }
+        }
+      }
+
+      # --- Bundled subcharts --------------------------------------------------
+
+      # NOTE on image repos: Bitnami's August-2025 catalog shake-up moved all
+      # existing non-"secure" tags from docker.io/bitnami/* to docker.io/
+      # bitnamilegacy/*. The Langfuse chart's subchart values still reference
+      # bitnami/* by default — pulls 404 / ImagePullBackOff with the chart's
+      # default image paths. Overriding each subchart's image.repository to
+      # the bitnamilegacy/* path is the standard fix; tags stay the same.
+      # (Same fix we applied earlier for the keycloak-postgres-postgresql
+      # pod, documented in project_eks_lab_progress.md.)
+
+      postgresql = {
+        deploy = true
+        image = {
+          repository = "bitnamilegacy/postgresql"
+        }
+        auth = {
+          password         = random_password.langfuse_pg_password.result
+          postgresPassword = random_password.langfuse_pg_password.result
+        }
+        primary = {
+          persistence = {
+            enabled = true
+            size    = "8Gi"
+          }
+          resources = {
+            requests = { cpu = "100m", memory = "256Mi" }
+            limits   = { cpu = "500m", memory = "512Mi" }
+          }
+        }
+      }
+
+      clickhouse = {
+        deploy = true
+        image = {
+          repository = "bitnamilegacy/clickhouse"
+        }
+        auth = {
+          password = random_password.langfuse_clickhouse_password.result
+        }
+        # Single-shard single-replica for lab footprint. Production-scale
+        # Langfuse wants 2+ replicas per shard for durability.
+        shards   = 1
+        replicaCount = 1
+        persistence = {
+          enabled = true
+          size    = "20Gi"  # Traces compound fast; 20 GiB covers months of lab use.
+        }
+        zookeeper = {
+          image = {
+            repository = "bitnamilegacy/zookeeper"
+          }
+          # ClickHouse Keeper replaces ZooKeeper in newer images, but the
+          # Bitnami chart still ships ZK as default. Single replica for lab.
+          replicaCount = 1
+          persistence = {
+            enabled = true
+            size    = "4Gi"
+          }
+        }
+        resources = {
+          requests = { cpu = "200m", memory = "512Mi" }
+          limits   = { cpu = "1000m", memory = "2Gi" }
+        }
+      }
+
+      redis = {
+        deploy = true
+        # Bitnami renamed Redis to Valkey in their catalog; chart still calls
+        # it 'redis' as the subchart key but pulls the valkey image.
+        image = {
+          repository = "bitnamilegacy/valkey"
+        }
+        auth = {
+          password = random_password.langfuse_redis_password.result
+        }
+        master = {
+          persistence = {
+            enabled = true
+            size    = "2Gi"
+          }
+          resources = {
+            requests = { cpu = "50m", memory = "128Mi" }
+            limits   = { cpu = "200m", memory = "256Mi" }
+          }
+        }
+      }
+
+      s3 = {
+        deploy = true
+        image = {
+          repository = "bitnamilegacy/minio"
+        }
+        auth = {
+          rootPassword = random_password.langfuse_minio_password.result
+        }
+        persistence = {
+          enabled = true
+          size    = "10Gi"
+        }
+        resources = {
+          requests = { cpu = "100m", memory = "256Mi" }
+          limits   = { cpu = "500m", memory = "512Mi" }
+        }
+      }
+    })
+  ]
+
+  depends_on = [
+    module.eks,
+    helm_release.ingress_nginx,
+    helm_release.cert_manager,
+  ]
+}
+
+output "langfuse_url" {
+  value       = "https://langfuse.${var.domain}"
+  description = "Langfuse UI — initial account is created via sign-up on first visit"
+}
