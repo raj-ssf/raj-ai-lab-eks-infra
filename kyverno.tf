@@ -1,0 +1,114 @@
+# Kyverno admission controller — enforces image-signature verification on
+# pods whose images come from our ECR. Partners with cosign signing in the
+# rag-service GHA workflow (see raj-ai-lab-eks/.github/workflows/).
+#
+# Kyverno verifies signatures by fetching the .sig OCI artifact from ECR;
+# its service account needs ECR read permissions, which we provide via Pod
+# Identity (same pattern as the other 5 workloads on this cluster).
+
+resource "kubernetes_namespace" "kyverno" {
+  metadata {
+    name = "kyverno"
+  }
+}
+
+# --- IAM: Kyverno reads ECR to fetch signature artifacts ---------------------
+
+resource "aws_iam_policy" "kyverno_ecr_read" {
+  name        = "${var.cluster_name}-kyverno-ecr-read"
+  description = "Allow Kyverno admission controller to fetch cosign signature artifacts from ECR"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "ecr:GetAuthorizationToken",
+        ]
+        Resource = "*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "ecr:BatchGetImage",
+          "ecr:GetDownloadUrlForLayer",
+          "ecr:DescribeImages",
+        ]
+        # Scoped to the rag-service repo; widen when more repos need signing.
+        Resource = aws_ecr_repository.rag_service.arn
+      },
+    ]
+  })
+}
+
+resource "aws_iam_role" "kyverno" {
+  name               = "${var.cluster_name}-kyverno"
+  assume_role_policy = data.aws_iam_policy_document.pod_identity_trust.json
+}
+
+resource "aws_iam_role_policy_attachment" "kyverno_ecr" {
+  role       = aws_iam_role.kyverno.name
+  policy_arn = aws_iam_policy.kyverno_ecr_read.arn
+}
+
+# Kyverno's admission controller SA is `kyverno-admission-controller` (chart
+# default). The verifyImages rule path runs inside that pod.
+resource "aws_eks_pod_identity_association" "kyverno" {
+  cluster_name    = module.eks.cluster_name
+  namespace       = kubernetes_namespace.kyverno.metadata[0].name
+  service_account = "kyverno-admission-controller"
+  role_arn        = aws_iam_role.kyverno.arn
+}
+
+# --- Helm release ------------------------------------------------------------
+
+resource "helm_release" "kyverno" {
+  name       = "kyverno"
+  namespace  = kubernetes_namespace.kyverno.metadata[0].name
+  repository = "https://kyverno.github.io/kyverno"
+  chart      = "kyverno"
+  version    = "3.3.5"
+
+  values = [
+    yamlencode({
+      # Single-replica each for lab footprint. Production-sized deployments
+      # run 3 replicas of admission-controller for HA and reduced webhook
+      # timeout risk.
+      admissionController = {
+        replicas = 1
+        resources = {
+          requests = { cpu = "100m", memory = "256Mi" }
+          limits   = { cpu = "500m", memory = "512Mi" }
+        }
+      }
+      backgroundController = {
+        replicas = 1
+        resources = {
+          requests = { cpu = "50m", memory = "128Mi" }
+          limits   = { cpu = "200m", memory = "256Mi" }
+        }
+      }
+      cleanupController = {
+        replicas = 1
+        resources = {
+          requests = { cpu = "50m", memory = "64Mi" }
+          limits   = { cpu = "100m", memory = "128Mi" }
+        }
+      }
+      reportsController = {
+        replicas = 1
+        resources = {
+          requests = { cpu = "50m", memory = "128Mi" }
+          limits   = { cpu = "200m", memory = "256Mi" }
+        }
+      }
+    })
+  ]
+
+  depends_on = [
+    module.eks,
+    helm_release.alb_controller,
+    aws_eks_pod_identity_association.kyverno,
+  ]
+}
