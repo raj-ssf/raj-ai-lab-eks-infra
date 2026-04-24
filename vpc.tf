@@ -26,25 +26,10 @@ data "aws_subnets" "public" {
   }
 }
 
-# Private subnets filtered to a single AZ, used by the GPU node group so the
-# GPU node always lands in the same AZ as the vllm-model-cache PVC's EBS
-# volume. Configurable via var.gpu_az (see variables.tf for the rationale).
-data "aws_subnets" "gpu_az_private" {
-  filter {
-    name   = "vpc-id"
-    values = [var.vpc_id]
-  }
-
-  filter {
-    name   = "tag:Name"
-    values = ["*Private*"]
-  }
-
-  filter {
-    name   = "availability-zone"
-    values = [var.gpu_az]
-  }
-}
+# data.aws_subnets.gpu_az_private — removed 2026-04-24. Karpenter's
+# EC2NodeClass now selects subnets via its own tag-match (see
+# karpenter-nodepool.tf), and the AZ pin lives in the NodePool's
+# topology.kubernetes.io/zone requirement.
 
 data "aws_subnet" "private" {
   for_each = toset(data.aws_subnets.private.ids)

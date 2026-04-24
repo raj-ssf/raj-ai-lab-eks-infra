@@ -51,30 +51,24 @@ variable "node_max_size" {
   default = 6
 }
 
-variable "enable_gpu_node_group" {
-  description = "Enable GPU Node Group"
-  type    = bool
-  default = false
-}
+# enable_gpu_node_group / gpu_instance_type / gpu_az — removed 2026-04-24.
+# Karpenter (see karpenter.tf + karpenter-nodepool.tf) now owns GPU node
+# provisioning. Instance types are listed directly in the NodePool's
+# requirements block, AZ is pinned there to match the PVC zone, and the
+# enable toggle is obsolete — pods drive provisioning via
+# `kubectl scale deployment vllm`.
 
-variable "gpu_instance_type" {
-  description = "AWS GPU Instance Type. Default g5.12xlarge (4x A10G, 96 GB VRAM) fits Llama 3.3 70B AWQ with tensor-parallel-size=4. Downgrade to g5.xlarge (1x A10G) for ~24B models."
-  type    = string
-  default = "g5.12xlarge"
-}
-
-variable "gpu_az" {
+variable "private_subnet_name_pattern" {
   description = <<-EOT
-    AZ to pin the GPU node group into. Must match the AZ of the vllm model-cache
-    PVC's EBS volume — EBS is AZ-locked and a GPU node in a different AZ
-    can't mount it, which leaves the vllm pod Pending with 'didn't match
-    PersistentVolume's node affinity'. Currently us-west-2c because that's
-    where the PVC was last (re)provisioned. If the PVC ever gets recreated
-    in a different AZ (deleted + re-bound by a pod on a non-2c node),
-    update this to match.
+    Tag-Name pattern used by Karpenter's EC2NodeClass.subnetSelectorTerms to
+    discover private subnets in the cluster's VPC. The pattern must uniquely
+    match this VPC's private subnets and NOT subnets of other VPCs in the
+    account (Karpenter would otherwise pick a subnet from a different VPC
+    and fail with "Security group and subnet belong to different networks").
+    Real value set in terraform.tfvars since it identifies the hosting VPC.
   EOT
   type    = string
-  default = "us-west-2c"
+  default = "*Private*"
 }
 
 variable "rds_instance_class" {

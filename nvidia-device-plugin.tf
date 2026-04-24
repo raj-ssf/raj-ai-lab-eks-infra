@@ -18,14 +18,14 @@
 # We need exactly one of its components (device plugin); the standalone
 # chart is a cleaner fit for a lab.
 #
-# Lifecycle: count-conditional on enable_gpu_node_group. When the toggle
-# flips true, Terraform apply creates the GPU node group AND installs the
-# device plugin. When the toggle flips back to false (between demos for
-# cost), both are destroyed together. No orphan kube-system resources.
+# Lifecycle: unconditional — always installed. With Karpenter (see
+# karpenter.tf), GPU nodes appear dynamically in response to pod demand
+# rather than via a static managed node group. The device-plugin DaemonSet
+# has nodeSelector nvidia.com/gpu=true so it has zero pods when no GPU
+# node exists (free at idle), and immediately schedules a pod onto any
+# GPU node Karpenter provisions.
 
 resource "helm_release" "nvidia_device_plugin" {
-  count = var.enable_gpu_node_group ? 1 : 0
-
   name       = "nvidia-device-plugin"
   namespace  = "kube-system"
   repository = "https://nvidia.github.io/k8s-device-plugin"
