@@ -121,6 +121,65 @@ resource "kubectl_manifest" "force_mtls" {
 }
 
 # =============================================================================
+# DestinationRule: DISABLE TLS for outbound to ingress-nginx Service.
+#
+# Why: CoreDNS has a rewrite (kube-system/coredns ConfigMap) mapping
+# `keycloak.ekstest.com` → `ingress-nginx-controller.ingress-nginx.svc.
+# cluster.local` to short-circuit the NLB hairpin for in-cluster OIDC
+# discovery. argocd-server (and langfuse-web) make HTTPS requests to
+# `https://keycloak.ekstest.com/...` which now resolve to the
+# ingress-nginx Service ClusterIP, hit NGINX directly, and get NGINX's
+# Let's Encrypt cert. NGINX is L7-terminating real TLS itself.
+#
+# When the source pod is meshed, source-side Envoy intercepts that
+# outbound connection. By default, Istio's auto-mTLS / SNI-based
+# routing kicks in for the destination Service (which IS in the mesh
+# from Istio's view since ingress-nginx is in mesh) — and that
+# interferes with the standard TLS handshake NGINX expects from a
+# regular HTTPS client. Symptom: source-side `connection reset by
+# peer` on the TLS handshake; destination-side NGINX log shows a
+# brief connect-then-disconnect.
+#
+# Fix: tls.mode=DISABLE here tells source Envoys "don't initiate any
+# TLS (mutual or otherwise) to this destination — pass the bytes
+# through transparently." The original HTTPS connection from the
+# client (argocd-server / langfuse-web) reaches NGINX intact, NGINX
+# terminates with its cert-manager-issued cert, and the OIDC
+# discovery succeeds.
+#
+# Note: this does NOT compromise mTLS for backend traffic. NGINX's
+# OUTBOUND traffic (NGINX → keycloak/argocd-server/etc.) still
+# initiates ISTIO_MUTUAL via the per-Service force-mtls
+# DestinationRules above. Only the leg from in-cluster source pods
+# directly to the ingress-nginx Service is affected — and that leg
+# is just standard HTTPS, no need for mesh mTLS on top.
+# =============================================================================
+
+resource "kubectl_manifest" "ingress_nginx_no_mtls" {
+  yaml_body = yamlencode({
+    apiVersion = "networking.istio.io/v1"
+    kind       = "DestinationRule"
+    metadata = {
+      name      = "ingress-nginx-no-mtls"
+      namespace = "ingress-nginx"
+    }
+    spec = {
+      host = "ingress-nginx-controller.ingress-nginx.svc.cluster.local"
+      trafficPolicy = {
+        tls = {
+          mode = "DISABLE"
+        }
+      }
+    }
+  })
+
+  depends_on = [
+    helm_release.istiod,
+    helm_release.ingress_nginx,
+  ]
+}
+
+# =============================================================================
 # Cluster-wide deny-all in the mesh root namespace.
 #
 # Empty `rules` field with default ALLOW action means "no rules match,
