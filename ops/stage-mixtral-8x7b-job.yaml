@@ -1,0 +1,131 @@
+# One-shot Job to stage Mixtral 8x7B Instruct AWQ weights from
+# HuggingFace (casperhansen/mixtral-instruct-awq, ~28 GB) into the
+# raj-ai-lab-eks-model-weights S3 bucket.
+#
+# Pattern mirrors ops/stage-llama-8b-job.yaml — see that file's
+# header for the why-in-cluster rationale, auth setup, and the
+# tooling choices (hf CLI, aws-cli v2 binary, hf_transfer parallel
+# downloads, sts/whoami pre-flight). Per-model deltas in this file:
+#   - HF_REPO        casperhansen/mixtral-instruct-awq (public; no
+#                    HF_TOKEN required, but the optional secret is
+#                    still mounted in case other models need it)
+#   - S3_PREFIX      mixtral-8x7b-instruct-awq (matches the
+#                    Deployment vllm-mixtral-8x7b's init S3_URI)
+#   - ephemeral PVC  50 GiB (28 GB weights + 2x headroom)
+#
+# Apply / monitor / verify (same pattern):
+#   kubectl apply -f ops/stage-mixtral-8x7b-job.yaml
+#   kubectl -n default logs -l job-name=stage-mixtral-8x7b -f
+#   aws s3 ls s3://raj-ai-lab-eks-model-weights/mixtral-8x7b-instruct-awq/
+
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: stage-mixtral-8x7b
+  namespace: default
+  labels:
+    op: stage-model-weights
+    model: mixtral-8x7b-awq
+spec:
+  backoffLimit: 1
+  activeDeadlineSeconds: 7200
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        op: stage-model-weights
+        model: mixtral-8x7b-awq
+    spec:
+      serviceAccountName: model-weights-stager
+      nodeSelector:
+        workload: general
+      restartPolicy: OnFailure
+      containers:
+        - name: stager
+          image: python:3.11-slim
+          env:
+            - name: HF_REPO
+              value: casperhansen/mixtral-instruct-awq
+            - name: S3_BUCKET
+              value: raj-ai-lab-eks-model-weights
+            - name: S3_PREFIX
+              value: mixtral-8x7b-instruct-awq
+            - name: AWS_REGION
+              value: us-west-2
+            - name: HF_HUB_ENABLE_HF_TRANSFER
+              value: "1"
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hf-token
+                  key: token
+                  optional: true
+          command: ["/bin/bash", "-euo", "pipefail", "-c"]
+          args:
+            - |
+              echo "=== [1/6] Installing hf + aws-cli v2 ==="
+              apt-get update -qq
+              apt-get install -qq -y --no-install-recommends curl ca-certificates tar unzip >/dev/null
+              pip install --quiet --no-cache-dir "huggingface_hub[cli,hf_transfer]"
+              curl -sSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscli.zip
+              unzip -q /tmp/awscli.zip -d /tmp
+              /tmp/aws/install
+
+              echo "=== [2/6] Tool versions + AWS identity ==="
+              hf --version
+              aws --version
+              aws sts get-caller-identity
+
+              echo "=== [3/6] Verifying HF auth ==="
+              if [ -z "${HF_TOKEN:-}" ]; then
+                echo "INFO: HF_TOKEN empty — fine, casperhansen mirror is public."
+              else
+                hf auth whoami
+              fi
+
+              echo "=== [4/6] Downloading $HF_REPO to /buffer/model ==="
+              # Exclude *.bin in case the mirror ships both safetensors
+              # and pickle formats; vLLM only needs safetensors.
+              cd /buffer
+              hf download "$HF_REPO" \
+                --local-dir ./model \
+                --exclude "*.bin"
+
+              echo "=== [5/6] Local download manifest ==="
+              ls -la ./model
+              du -sh ./model
+
+              echo "=== [6/6] Uploading to s3://$S3_BUCKET/$S3_PREFIX/ ==="
+              aws configure set default.s3.max_concurrent_requests 32
+              aws configure set default.s3.multipart_chunksize 128MB
+              aws s3 sync ./model/ "s3://$S3_BUCKET/$S3_PREFIX/" \
+                --exclude '.cache/*' \
+                --no-progress
+
+              echo "=== S3 manifest ==="
+              aws s3 ls "s3://$S3_BUCKET/$S3_PREFIX/" --recursive --summarize --human-readable
+
+              echo "=== Done — staged $HF_REPO to s3://$S3_BUCKET/$S3_PREFIX/ ==="
+          resources:
+            requests:
+              cpu: "2"
+              memory: "4Gi"
+            limits:
+              cpu: "4"
+              memory: "8Gi"
+          volumeMounts:
+            - name: buffer
+              mountPath: /buffer
+      volumes:
+        - name: buffer
+          ephemeral:
+            volumeClaimTemplate:
+              metadata:
+                labels:
+                  op: stage-model-weights
+              spec:
+                accessModes: [ReadWriteOnce]
+                resources:
+                  requests:
+                    storage: 50Gi
+                storageClassName: gp3

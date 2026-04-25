@@ -32,7 +32,7 @@ resource "helm_release" "argocd" {
           # own the value without fighting the chart for that Secret.
           "oidc.config" = yamlencode({
             name         = "Keycloak"
-            issuer       = "https://keycloak.${var.domain}/realms/raj-ai-lab-eks"
+            issuer       = "https://keycloak.${var.domain}/realms/${var.cluster_name}"
             clientID     = "argocd"
             clientSecret = "$argocd-oidc-vault:client_secret"
             requestedScopes = ["openid", "profile", "email"]

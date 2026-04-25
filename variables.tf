@@ -51,30 +51,24 @@ variable "node_max_size" {
   default = 6
 }
 
-variable "enable_gpu_node_group" {
-  description = "Enable GPU Node Group"
-  type    = bool
-  default = false
-}
+# enable_gpu_node_group / gpu_instance_type / gpu_az — removed 2026-04-24.
+# Karpenter (see karpenter.tf + karpenter-nodepool.tf) now owns GPU node
+# provisioning. Instance types are listed directly in the NodePool's
+# requirements block, AZ is pinned there to match the PVC zone, and the
+# enable toggle is obsolete — pods drive provisioning via
+# `kubectl scale deployment vllm`.
 
-variable "gpu_instance_type" {
-  description = "AWS GPU Instance Type. Default g5.12xlarge (4x A10G, 96 GB VRAM) fits Llama 3.3 70B AWQ with tensor-parallel-size=4. Downgrade to g5.xlarge (1x A10G) for ~24B models."
-  type    = string
-  default = "g5.12xlarge"
-}
-
-variable "gpu_az" {
+variable "private_subnet_name_pattern" {
   description = <<-EOT
-    AZ to pin the GPU node group into. Must match the AZ of the vllm model-cache
-    PVC's EBS volume — EBS is AZ-locked and a GPU node in a different AZ
-    can't mount it, which leaves the vllm pod Pending with 'didn't match
-    PersistentVolume's node affinity'. Currently us-west-2c because that's
-    where the PVC was last (re)provisioned. If the PVC ever gets recreated
-    in a different AZ (deleted + re-bound by a pod on a non-2c node),
-    update this to match.
+    Tag-Name pattern used by Karpenter's EC2NodeClass.subnetSelectorTerms to
+    discover private subnets in the cluster's VPC. The pattern must uniquely
+    match this VPC's private subnets and NOT subnets of other VPCs in the
+    account (Karpenter would otherwise pick a subnet from a different VPC
+    and fail with "Security group and subnet belong to different networks").
+    Real value set in terraform.tfvars since it identifies the hosting VPC.
   EOT
   type    = string
-  default = "us-west-2c"
+  default = "*Private*"
 }
 
 variable "rds_instance_class" {
@@ -136,6 +130,14 @@ variable "domain" {
     description = "GitHub repo name containing the GHA workflow"
   }
 
+  # Bootstrap admin passwords — stateful services (Grafana, Keycloak, Postgres)
+  # persist these internally on first boot, so rotating via random_password +
+  # Vault alone does NOT propagate to the running service's own user record.
+  # Keep them in tfvars (gitignored) as the declarative bootstrap source.
+  # Additionally, keycloak_admin_password is consumed by the keycloak TF
+  # provider at plan-time for admin-API auth — can't be a random_password
+  # that only exists post-apply.
+
   variable "grafana_admin_password" {
     type        = string
     description = "Initial admin password for Grafana — rotate via UI once logged in"
@@ -144,7 +146,7 @@ variable "domain" {
 
   variable "keycloak_admin_password" {
     type        = string
-    description = "Bootstrap admin password for the Keycloak master realm"
+    description = "Bootstrap admin password for the Keycloak master realm. Also consumed by the keycloak TF provider for admin-API auth."
     sensitive   = true
   }
 
@@ -152,6 +154,26 @@ variable "domain" {
     type        = string
     description = "Password for the Postgres 'keycloak' user backing Keycloak"
     sensitive   = true
+  }
+
+  # Demo user identity for the Keycloak realm. Identifying values are sourced
+  # from terraform.tfvars (gitignored) rather than baked into the realm JSON
+  # in keycloak-realm.tf. The SSO-account-link into Langfuse matches by
+  # email, so keycloak_demo_user_email must match whatever email the
+  # Langfuse local-auth user was created with.
+  variable "keycloak_demo_user_email" {
+    type        = string
+    description = "Email for the Keycloak realm's demo user (must match the Langfuse local-auth user email for account linking to work)"
+  }
+
+  variable "keycloak_demo_user_first_name" {
+    type        = string
+    description = "First name for the Keycloak realm's demo user"
+  }
+
+  variable "keycloak_demo_user_last_name" {
+    type        = string
+    description = "Last name for the Keycloak realm's demo user"
   }
 
   # --- Langfuse API keys for rag-service --------------------------------------

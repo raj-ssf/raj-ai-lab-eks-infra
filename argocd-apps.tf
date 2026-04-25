@@ -146,6 +146,101 @@ resource "kubectl_manifest" "vllm_app" {
         server    = "https://kubernetes.default.svc"
         namespace = "llm"
       }
+      # Git declares `replicas: 0` on every vllm* Deployment as the
+      # steady state (cost-off). Demo/test spin-up is
+      # `kubectl scale --replicas=1`. ignoreDifferences +
+      # RespectIgnoreDifferences=true tells ArgoCD's selfHeal loop to
+      # leave the live replica count alone — otherwise it would snap it
+      # back to 0 within seconds and the GPU node would never come up.
+      #
+      # One entry per Deployment (the match tuple is GVK + name +
+      # namespace). Grouped as:
+      #   - `vllm`              — default demo path (70B AWQ on g5/g6)
+      #   - `vllm-<hardware>`   — hardware-test variants (same 70B AWQ
+      #                           across different GPU families); see
+      #                           llm/base/deployment-variants.yaml
+      #   - `vllm-<model>`      — model-test variants (different
+      #                           models on their optimal hardware);
+      #                           see llm/base/deployment-models.yaml
+      ignoreDifferences = [
+        {
+          group        = "apps"
+          kind         = "Deployment"
+          name         = "vllm"
+          namespace    = "llm"
+          jsonPointers = ["/spec/replicas"]
+        },
+        {
+          group        = "apps"
+          kind         = "Deployment"
+          name         = "vllm-g4dn-4gpu"
+          namespace    = "llm"
+          jsonPointers = ["/spec/replicas"]
+        },
+        {
+          group        = "apps"
+          kind         = "Deployment"
+          name         = "vllm-g6e-1gpu"
+          namespace    = "llm"
+          jsonPointers = ["/spec/replicas"]
+        },
+        {
+          group        = "apps"
+          kind         = "Deployment"
+          name         = "vllm-g6e-4gpu"
+          namespace    = "llm"
+          jsonPointers = ["/spec/replicas"]
+        },
+        {
+          group        = "apps"
+          kind         = "Deployment"
+          name         = "vllm-p4d-8gpu"
+          namespace    = "llm"
+          jsonPointers = ["/spec/replicas"]
+        },
+        {
+          group        = "apps"
+          kind         = "Deployment"
+          name         = "vllm-p5-8gpu"
+          namespace    = "llm"
+          jsonPointers = ["/spec/replicas"]
+        },
+        {
+          group        = "apps"
+          kind         = "Deployment"
+          name         = "vllm-llama-8b"
+          namespace    = "llm"
+          jsonPointers = ["/spec/replicas"]
+        },
+        {
+          group        = "apps"
+          kind         = "Deployment"
+          name         = "vllm-mixtral-8x7b"
+          namespace    = "llm"
+          jsonPointers = ["/spec/replicas"]
+        },
+        {
+          group        = "apps"
+          kind         = "Deployment"
+          name         = "vllm-llama-vision-11b"
+          namespace    = "llm"
+          jsonPointers = ["/spec/replicas"]
+        },
+        {
+          group        = "apps"
+          kind         = "Deployment"
+          name         = "vllm-llama-405b"
+          namespace    = "llm"
+          jsonPointers = ["/spec/replicas"]
+        },
+        {
+          group        = "apps"
+          kind         = "Deployment"
+          name         = "vllm-deepseek-r1-70b"
+          namespace    = "llm"
+          jsonPointers = ["/spec/replicas"]
+        },
+      ]
       syncPolicy = {
         automated = {
           prune    = true
@@ -154,6 +249,7 @@ resource "kubectl_manifest" "vllm_app" {
         syncOptions = [
           "CreateNamespace=true",
           "PrunePropagationPolicy=foreground",
+          "RespectIgnoreDifferences=true",
         ]
       }
     }

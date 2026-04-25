@@ -1,0 +1,156 @@
+# One-shot Job to stage DeepSeek-R1-Distill-Llama-70B AWQ-INT4
+# (~40 GB) from HuggingFace into the raj-ai-lab-eks-model-weights
+# S3 bucket.
+#
+# Pattern mirrors ops/stage-llama-8b-job.yaml — see that file's
+# header for the why-in-cluster rationale and tooling choices.
+# Per-model deltas:
+#   - HF_REPO        casperhansen/deepseek-r1-distill-llama-70b-awq
+#                    Public community AWQ quant of DeepSeek-AI's R1
+#                    distillation onto Llama 3.3 70B's architecture.
+#                    Same provider as Mixtral 8x7B AWQ + the original
+#                    Llama 3.3 70B AWQ in this bucket — single AWQ
+#                    provider across the lab.
+#                    No license acceptance needed — DeepSeek's
+#                    distills are MIT-licensed; the AWQ re-upload
+#                    inherits that.
+#                    Alternative public AWQ provider if casperhansen
+#                    is ever taken down or moved:
+#                      Valdemardi/DeepSeek-R1-Distill-Llama-70B-AWQ
+#                    For FP16 (~140 GB), the official upstream is
+#                    deepseek-ai/DeepSeek-R1-Distill-Llama-70B.
+#   - S3_PREFIX      deepseek-r1-distill-llama-70b-awq
+#   - ephemeral PVC  80 GiB (40 GB weights + ~2x headroom)
+#
+# Why this model is interesting in the lab catalog: it's a *reasoning*
+# model — fine-tuned to emit <think>...</think> chain-of-thought
+# before its final answer. Same tensor shapes as Llama 3.3 70B AWQ
+# (same architecture, same hardware fit), so we can demo "same GPU,
+# same vLLM args, different weights, observe the reasoning trace in
+# Langfuse" — a clean head-to-head comparison.
+#
+# Apply / monitor / verify:
+#   kubectl apply -f ops/stage-deepseek-r1-70b-job.yaml
+#   kubectl -n default logs -l job-name=stage-deepseek-r1-70b -f
+#   aws s3 ls s3://raj-ai-lab-eks-model-weights/deepseek-r1-distill-llama-70b-awq/
+#
+# Note on the pip install line vs older Jobs: huggingface_hub 1.x
+# dropped the [cli,hf_transfer] extras (CLI is now in the base
+# package, and hf_transfer is a separately-published Rust extension).
+# This Job uses the two-package syntax that works on both 0.x and
+# 1.x — the older Jobs in this dir get the same warnings as our 405B
+# run but still work. For new staging Jobs, use the syntax below.
+
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: stage-deepseek-r1-70b
+  namespace: default
+  labels:
+    op: stage-model-weights
+    model: deepseek-r1-distill-llama-70b-awq
+spec:
+  backoffLimit: 1
+  activeDeadlineSeconds: 7200
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        op: stage-model-weights
+        model: deepseek-r1-distill-llama-70b-awq
+    spec:
+      serviceAccountName: model-weights-stager
+      nodeSelector:
+        workload: general
+      restartPolicy: OnFailure
+      containers:
+        - name: stager
+          image: python:3.11-slim
+          env:
+            - name: HF_REPO
+              value: casperhansen/deepseek-r1-distill-llama-70b-awq
+            - name: S3_BUCKET
+              value: raj-ai-lab-eks-model-weights
+            - name: S3_PREFIX
+              value: deepseek-r1-distill-llama-70b-awq
+            - name: AWS_REGION
+              value: us-west-2
+            - name: HF_HUB_ENABLE_HF_TRANSFER
+              value: "1"
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hf-token
+                  key: token
+                  optional: true
+          command: ["/bin/bash", "-euo", "pipefail", "-c"]
+          args:
+            - |
+              echo "=== [1/6] Installing hf + hf_transfer + aws-cli v2 ==="
+              apt-get update -qq
+              apt-get install -qq -y --no-install-recommends curl ca-certificates tar unzip >/dev/null
+              # huggingface_hub 1.x packages the CLI in the base; hf_transfer
+              # is a separate package with its own release cadence (Rust
+              # binary, platform-specific wheels). Two-package syntax works
+              # on both 0.x and 1.x without warnings.
+              pip install --quiet --no-cache-dir huggingface_hub hf_transfer
+              curl -sSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscli.zip
+              unzip -q /tmp/awscli.zip -d /tmp
+              /tmp/aws/install
+
+              echo "=== [2/6] Tool versions + AWS identity ==="
+              hf --version
+              aws --version
+              aws sts get-caller-identity
+
+              echo "=== [3/6] Verifying HF auth ==="
+              if [ -z "${HF_TOKEN:-}" ]; then
+                echo "INFO: HF_TOKEN empty — fine, cognitivecomputations mirror is public."
+              else
+                hf auth whoami
+              fi
+
+              echo "=== [4/6] Downloading $HF_REPO to /buffer/model ==="
+              cd /buffer
+              hf download "$HF_REPO" \
+                --local-dir ./model \
+                --exclude "*.bin"
+
+              echo "=== [5/6] Local download manifest ==="
+              ls -la ./model
+              du -sh ./model
+
+              echo "=== [6/6] Uploading to s3://$S3_BUCKET/$S3_PREFIX/ ==="
+              aws configure set default.s3.max_concurrent_requests 32
+              aws configure set default.s3.multipart_chunksize 128MB
+              aws s3 sync ./model/ "s3://$S3_BUCKET/$S3_PREFIX/" \
+                --exclude '.cache/*' \
+                --no-progress
+
+              echo "=== S3 manifest ==="
+              aws s3 ls "s3://$S3_BUCKET/$S3_PREFIX/" --recursive --summarize --human-readable
+
+              echo "=== Done — staged $HF_REPO to s3://$S3_BUCKET/$S3_PREFIX/ ==="
+          resources:
+            requests:
+              cpu: "1"
+              memory: "4Gi"
+            limits:
+              cpu: "4"
+              memory: "8Gi"
+          volumeMounts:
+            - name: buffer
+              mountPath: /buffer
+      volumes:
+        - name: buffer
+          ephemeral:
+            volumeClaimTemplate:
+              metadata:
+                labels:
+                  op: stage-model-weights
+              spec:
+                accessModes: [ReadWriteOnce]
+                resources:
+                  requests:
+                    storage: 80Gi
+                storageClassName: gp3

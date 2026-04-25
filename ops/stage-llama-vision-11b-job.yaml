@@ -1,0 +1,142 @@
+# One-shot Job to stage Llama 3.2 11B Vision Instruct (FP16, ~22 GB)
+# from HuggingFace into the raj-ai-lab-eks-model-weights S3 bucket.
+#
+# Pattern mirrors ops/stage-llama-8b-job.yaml — see that file's
+# header for the why-in-cluster rationale and tooling choices.
+# Per-model deltas:
+#   - HF_REPO        meta-llama/Llama-3.2-11B-Vision-Instruct
+#                    GATED by Meta's license. Before applying:
+#                    1. Visit https://huggingface.co/meta-llama/Llama-3.2-11B-Vision-Instruct
+#                    2. Accept the Llama 3.2 community license
+#                    3. Confirm your existing hf-token in default
+#                       namespace has read access to this repo
+#                       (kubectl -n default get secret hf-token,
+#                       same token reused from the 8B stage)
+#                    Without license acceptance, the download 401s
+#                    even with a valid token.
+#   - S3_PREFIX      llama-3.2-11b-vision-instruct (matches the
+#                    Deployment vllm-llama-vision-11b's init S3_URI)
+#   - ephemeral PVC  40 GiB (22 GB weights + ~2x headroom)
+#
+# Vision-specific note: the repo includes both the language model
+# safetensors AND vision-tower weights (image preprocessor + vision
+# transformer). vLLM's mllama loader expects both at /model. Don't
+# add filtering excludes that drop the vision tower.
+
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: stage-llama-vision-11b
+  namespace: default
+  labels:
+    op: stage-model-weights
+    model: llama-3.2-11b-vision
+spec:
+  backoffLimit: 1
+  activeDeadlineSeconds: 7200
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        op: stage-model-weights
+        model: llama-3.2-11b-vision
+    spec:
+      serviceAccountName: model-weights-stager
+      nodeSelector:
+        workload: general
+      restartPolicy: OnFailure
+      containers:
+        - name: stager
+          image: python:3.11-slim
+          env:
+            - name: HF_REPO
+              value: meta-llama/Llama-3.2-11B-Vision-Instruct
+            - name: S3_BUCKET
+              value: raj-ai-lab-eks-model-weights
+            - name: S3_PREFIX
+              value: llama-3.2-11b-vision-instruct
+            - name: AWS_REGION
+              value: us-west-2
+            - name: HF_HUB_ENABLE_HF_TRANSFER
+              value: "1"
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hf-token
+                  key: token
+                  optional: true
+          command: ["/bin/bash", "-euo", "pipefail", "-c"]
+          args:
+            - |
+              echo "=== [1/6] Installing hf + aws-cli v2 ==="
+              apt-get update -qq
+              apt-get install -qq -y --no-install-recommends curl ca-certificates tar unzip >/dev/null
+              pip install --quiet --no-cache-dir "huggingface_hub[cli,hf_transfer]"
+              curl -sSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscli.zip
+              unzip -q /tmp/awscli.zip -d /tmp
+              /tmp/aws/install
+
+              echo "=== [2/6] Tool versions + AWS identity ==="
+              hf --version
+              aws --version
+              aws sts get-caller-identity
+
+              echo "=== [3/6] Verifying HF auth ==="
+              if [ -z "${HF_TOKEN:-}" ]; then
+                echo "ERROR: HF_TOKEN empty — Llama 3.2 Vision is gated, this WILL fail."
+                echo "Create the secret: kubectl -n default create secret generic hf-token --from-literal=token=hf_xxx"
+                exit 1
+              fi
+              hf auth whoami
+
+              echo "=== [4/6] Downloading $HF_REPO to /buffer/model ==="
+              # Excludes:
+              #   *.bin            — prefer safetensors (Meta ships both)
+              #   original/*       — Meta's raw consolidated .pth, ~22 GB extra
+              # Do NOT exclude vision-tower or preprocessor files —
+              # vLLM's mllama loader requires both the LM and the
+              # vision encoder weights to live under the same dir.
+              cd /buffer
+              hf download "$HF_REPO" \
+                --local-dir ./model \
+                --exclude "*.bin" \
+                --exclude "original/*"
+
+              echo "=== [5/6] Local download manifest ==="
+              ls -la ./model
+              du -sh ./model
+
+              echo "=== [6/6] Uploading to s3://$S3_BUCKET/$S3_PREFIX/ ==="
+              aws configure set default.s3.max_concurrent_requests 32
+              aws configure set default.s3.multipart_chunksize 128MB
+              aws s3 sync ./model/ "s3://$S3_BUCKET/$S3_PREFIX/" \
+                --exclude '.cache/*' \
+                --no-progress
+
+              echo "=== S3 manifest ==="
+              aws s3 ls "s3://$S3_BUCKET/$S3_PREFIX/" --recursive --summarize --human-readable
+
+              echo "=== Done — staged $HF_REPO to s3://$S3_BUCKET/$S3_PREFIX/ ==="
+          resources:
+            requests:
+              cpu: "2"
+              memory: "4Gi"
+            limits:
+              cpu: "4"
+              memory: "8Gi"
+          volumeMounts:
+            - name: buffer
+              mountPath: /buffer
+      volumes:
+        - name: buffer
+          ephemeral:
+            volumeClaimTemplate:
+              metadata:
+                labels:
+                  op: stage-model-weights
+              spec:
+                accessModes: [ReadWriteOnce]
+                resources:
+                  requests:
+                    storage: 40Gi
+                storageClassName: gp3

@@ -105,8 +105,36 @@ resource "helm_release" "langfuse" {
           }
           url = "https://langfuse.${var.domain}"
         }
-        # Local auth only for now. OIDC via Keycloak is a follow-up.
-        # auth = { providers = { ... } }
+
+        # Keycloak OIDC (client managed by keycloak-langfuse-client.tf).
+        # Users hit https://langfuse.ekstest.com, get redirected to Keycloak
+        # for login, and land back on Langfuse authenticated.
+        #
+        # NOTE: chart v1.0.0 accepts `auth.providers.keycloak.*` in its
+        # values schema but doesn't actually render those into env vars on
+        # the rendered Deployment — the chart docs claim support, the
+        # template doesn't implement it. Using the documented escape hatch
+        # `additionalEnv` to inject the standard AUTH_KEYCLOAK_* env vars
+        # that Langfuse's NextAuth.js provider reads directly. Revisit if
+        # the chart fixes the auth.providers.* path in a future version.
+        additionalEnv = [
+          {
+            name  = "AUTH_KEYCLOAK_CLIENT_ID"
+            value = keycloak_openid_client.langfuse.client_id
+          },
+          {
+            name  = "AUTH_KEYCLOAK_CLIENT_SECRET"
+            value = random_password.keycloak_langfuse_client_secret.result
+          },
+          {
+            name  = "AUTH_KEYCLOAK_ISSUER"
+            value = "https://keycloak.${var.domain}/realms/${var.cluster_name}"
+          },
+          {
+            name  = "AUTH_KEYCLOAK_ALLOW_ACCOUNT_LINKING"
+            value = "true"
+          },
+        ]
 
         # Web tier (Next.js frontend + API).
         web = {
@@ -259,6 +287,9 @@ resource "helm_release" "langfuse" {
     module.eks,
     helm_release.ingress_nginx,
     helm_release.cert_manager,
+    # Keycloak OIDC client must exist before langfuse-web starts, so the
+    # first NextAuth signin attempt doesn't 500 on "unknown_client".
+    keycloak_openid_client.langfuse,
   ]
 }
 

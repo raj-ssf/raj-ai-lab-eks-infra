@@ -1,0 +1,189 @@
+# One-shot Job to stage Llama 3.1 8B Instruct weights from HuggingFace
+# into the raj-ai-lab-eks-model-weights S3 bucket.
+#
+# Why in-cluster instead of from a laptop:
+# ---------------------------------------
+# Downloading ~16 GB of weights from HF over a home ISP (~50 Mbps up)
+# and re-uploading to S3 takes ~45 min each way. Running on an
+# m5.xlarge in-cluster hits HF's CDN over the AWS backbone (~1 Gbps)
+# and uploads via the VPC S3 gateway endpoint (multi-Gbps, free
+# egress) → ~5 min end-to-end.
+#
+# Authentication:
+# ---------------
+# S3 write access: Pod Identity on SA `default/model-weights-stager`,
+# created by raj-ai-lab-eks-infra/model-weights.tf. IAM role has
+# PutObject/GetObject/DeleteObject/MultipartUpload on this bucket.
+#
+# HuggingFace: Meta's Llama 3.x models are gated. Create an HF token
+# at https://huggingface.co/settings/tokens (with read scope), accept
+# the license on the model page at
+# https://huggingface.co/meta-llama/Meta-Llama-3.1-8B-Instruct, then:
+#   kubectl -n default create secret generic hf-token \
+#     --from-literal=token=hf_xxxxxxxxxxxxxxxxxxxxxx
+# The secret is referenced `optional: true` — if you're staging a
+# public (non-gated) model, omit the secret and the download works
+# anonymously.
+#
+# Apply:
+#   kubectl apply -f ops/stage-llama-8b-job.yaml
+# Watch:
+#   kubectl -n default logs -l job-name=stage-llama-8b -f
+# Verify:
+#   aws s3 ls s3://raj-ai-lab-eks-model-weights/llama-3.1-8b-instruct/
+# Re-run (if failed):
+#   kubectl -n default delete job stage-llama-8b
+#   kubectl apply -f ops/stage-llama-8b-job.yaml
+# Job auto-deletes 1h after success via ttlSecondsAfterFinished.
+#
+# Template note:
+# --------------
+# Copy this file to stage-mixtral-8x7b-job.yaml / stage-vision-11b-job.yaml
+# / stage-405b-job.yaml for subsequent models. Per-model changes:
+#   - metadata.name + labels.model
+#   - env.HF_REPO          (HuggingFace repo ID)
+#   - env.S3_PREFIX        (S3 prefix under the bucket)
+#   - volumes[0].ephemeral.volumeClaimTemplate.spec.resources.requests.storage
+#     (size the buffer for 2× the model on disk: 50Gi for Mixtral,
+#      40Gi for Vision 11B, 300Gi for 405B AWQ)
+#   - activeDeadlineSeconds (bump for larger models: 7200 = 2h is
+#     plenty for anything up to 70B; 405B at 230 GB needs ~4h)
+
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: stage-llama-8b
+  namespace: default
+  labels:
+    op: stage-model-weights
+    model: llama-3.1-8b
+spec:
+  backoffLimit: 1
+  activeDeadlineSeconds: 7200
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        op: stage-model-weights
+        model: llama-3.1-8b
+    spec:
+      serviceAccountName: model-weights-stager
+      nodeSelector:
+        workload: general
+      restartPolicy: OnFailure
+      containers:
+        - name: stager
+          image: python:3.11-slim
+          env:
+            - name: HF_REPO
+              value: meta-llama/Meta-Llama-3.1-8B-Instruct
+            - name: S3_BUCKET
+              value: raj-ai-lab-eks-model-weights
+            - name: S3_PREFIX
+              value: llama-3.1-8b-instruct
+            - name: AWS_REGION
+              value: us-west-2
+            - name: HF_HUB_ENABLE_HF_TRANSFER
+              value: "1"
+            # HF token pulled from an optional Secret. If the Secret
+            # doesn't exist, HF_TOKEN is empty and huggingface-cli
+            # falls back to anonymous access — fine for public repos,
+            # will 401 for gated ones like Meta Llama.
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hf-token
+                  key: token
+                  optional: true
+          command: ["/bin/bash", "-euo", "pipefail", "-c"]
+          args:
+            - |
+              echo "=== [1/6] Installing hf + aws-cli v2 ==="
+              apt-get update -qq
+              apt-get install -qq -y --no-install-recommends curl ca-certificates tar unzip >/dev/null
+              # huggingface_hub 0.30+ renamed huggingface-cli → hf. The
+              # old entry point's deprecation wrapper doesn't pass args
+              # through cleanly, so we use `hf` directly.
+              pip install --quiet --no-cache-dir "huggingface_hub[cli,hf_transfer]"
+              # aws-cli v2 binary — boto3-based SDK fully supports
+              # EKS Pod Identity (creds at 169.254.170.23). s5cmd
+              # v2.2.2's bundled aws-sdk-go v1 pre-dates Feb 2024's
+              # endpoint-allowlist fix and rejects that IP as non-
+              # loopback, producing NoCredentialProviders on upload.
+              curl -sSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscli.zip
+              unzip -q /tmp/awscli.zip -d /tmp
+              /tmp/aws/install
+
+              echo "=== [2/6] Tool versions + AWS identity ==="
+              hf --version
+              aws --version
+              # sts call verifies Pod Identity credentials are being
+              # served correctly — if this fails, S3 upload will too.
+              aws sts get-caller-identity
+
+              echo "=== [3/6] Verifying HF auth ==="
+              if [ -z "${HF_TOKEN:-}" ]; then
+                echo "WARNING: HF_TOKEN empty — gated repos (Meta Llama) will 401."
+              else
+                hf auth whoami
+              fi
+
+              echo "=== [4/6] Downloading $HF_REPO to /buffer/model ==="
+              # Excludes:
+              #   *.bin            — prefer safetensors (Meta ships both)
+              #   original/*       — Meta's raw consolidated .pth, ~16 GB extra, not needed by vLLM
+              cd /buffer
+              hf download "$HF_REPO" \
+                --local-dir ./model \
+                --exclude "*.bin" \
+                --exclude "original/*"
+
+              echo "=== [5/6] Local download manifest ==="
+              ls -la ./model
+              du -sh ./model
+
+              echo "=== [6/6] Uploading to s3://$S3_BUCKET/$S3_PREFIX/ ==="
+              # aws s3 sync with tuning for multi-Gbps upload over VPC
+              # endpoint. 32 concurrent reqs + 128 MB multipart chunks.
+              # --exclude '.cache/*' — hf download creates a local
+              # metadata cache we don't want mirrored into S3 (won't
+              # break vLLM, just ~20 files of clutter).
+              aws configure set default.s3.max_concurrent_requests 32
+              aws configure set default.s3.multipart_chunksize 128MB
+              aws s3 sync ./model/ "s3://$S3_BUCKET/$S3_PREFIX/" \
+                --exclude '.cache/*' \
+                --no-progress
+
+              echo "=== S3 manifest ==="
+              aws s3 ls "s3://$S3_BUCKET/$S3_PREFIX/" --recursive --summarize --human-readable
+
+              echo "=== Done — staged $HF_REPO to s3://$S3_BUCKET/$S3_PREFIX/ ==="
+          resources:
+            requests:
+              cpu: "2"
+              memory: "4Gi"
+            limits:
+              cpu: "4"
+              memory: "8Gi"
+          volumeMounts:
+            - name: buffer
+              mountPath: /buffer
+      volumes:
+        - name: buffer
+          ephemeral:
+            volumeClaimTemplate:
+              metadata:
+                labels:
+                  op: stage-model-weights
+              spec:
+                accessModes: [ReadWriteOnce]
+                resources:
+                  requests:
+                    # Sized for Llama 3.1 8B FP16 (~16 GB weights) +
+                    # HF-cli staging overhead + slack. Per-model sizes
+                    # for subsequent stages:
+                    #   Mixtral 8x7B AWQ   → 50Gi  (~28 GB on disk)
+                    #   Llama Vision 11B   → 40Gi  (~22 GB on disk)
+                    #   Llama 405B AWQ     → 300Gi (~230 GB on disk)
+                    storage: 30Gi
+                storageClassName: gp3

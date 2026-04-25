@@ -94,6 +94,31 @@ resource "helm_release" "istiod" {
           # Requires K8s 1.28+ (EKS 1.34 supports it).
           ENABLE_NATIVE_SIDECARS = "true"
         }
+        # CRITICAL: tell istiod's injector that istio-cni is installed.
+        # Without this, the injector defaults to adding an istio-init
+        # init container to every meshed pod that runs istio-iptables
+        # to set up traffic capture. But istio-cni-node ALSO sees these
+        # pods and SKIPS them ("excluded due to being already injected
+        # with istio-init container") — so the CNI plugin's iptables
+        # setup never runs. Result: pods get a sidecar but iptables
+        # never redirects outbound traffic to Envoy → traffic bypasses
+        # the mesh entirely → mTLS doesn't engage → AuthorizationPolicy
+        # rules with principal-based ALLOW match nothing → 403 RBAC.
+        #
+        # Setting pilot.cni.enabled=true makes the injector skip the
+        # istio-init container; istio-cni-node then takes over and sets
+        # up iptables via the CNI plugin chain on pod creation. This is
+        # the canonical Istio + CNI integration mode.
+        #
+        # Diagnosed 2026-04-25 after several hours of debugging mTLS
+        # not engaging despite all surface-level config (sidecar
+        # injection, DestinationRules, AuthorizationPolicies) looking
+        # correct. The injector ConfigMap showed pilot.cni.enabled =
+        # False; istio-cni-node logs showed every meshed pod being
+        # excluded. The two halves of the integration weren't talking.
+        cni = {
+          enabled = true
+        }
       }
       # Prometheus picks up istiod + envoy metrics via ServiceMonitors the
       # chart ships when telemetry.enabled (true by default since 1.22).

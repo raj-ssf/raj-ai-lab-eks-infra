@@ -10,17 +10,17 @@
 # Ready — same mechanic kubelet uses for any other scheduled pod, just
 # without any real workload attached.
 #
-# Lifecycle: count-conditional on enable_gpu_node_group. When the toggle
-# flips true, Terraform creates the DaemonSet; it lands on the (just-joined)
-# GPU node in <30s; image pull completes in ~3-5 min in parallel with vllm
-# pod scheduling. Kyverno catch-all doesn't gate kube-system, so no
-# allowlist changes needed.
+# Lifecycle: unconditional. With Karpenter owning GPU provisioning, this
+# DaemonSet sits with zero pods when no GPU node exists, then lands on
+# any GPU node Karpenter brings up — pre-pulling vllm/vllm-openai in
+# parallel with the actual vllm pod's cold-start. When Karpenter
+# consolidates an empty GPU node (vllm scaled to 0), the DaemonSet pod
+# terminates with the node. Kyverno catch-all doesn't gate kube-system,
+# so no allowlist changes needed.
 #
 # Cost: zero. The pause container uses ~1 MB RAM and no CPU.
 
 resource "kubectl_manifest" "vllm_image_prepull" {
-  count = var.enable_gpu_node_group ? 1 : 0
-
   yaml_body = yamlencode({
     apiVersion = "apps/v1"
     kind       = "DaemonSet"

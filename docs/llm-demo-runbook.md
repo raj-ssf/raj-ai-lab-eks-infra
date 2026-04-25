@@ -1,52 +1,54 @@
 # vLLM 70B Demo Runbook
 
-On-demand spin-up for Llama 3.3 70B AWQ serving on a g5.12xlarge GPU node.
-Idle cost ~$6/mo (PVC + S3); demo cost ~$5.67/hr while the GPU node is up.
+On-demand Llama 3.3 70B AWQ serving on a Karpenter-provisioned GPU node.
+Idle cost ~$6/mo (PVC + S3). Demo cost is GPU-instance-dependent:
+~$5.67/hr on g5.12xlarge, ~$4.60/hr on g6.12xlarge (Karpenter picks the
+cheapest available in its allowed list).
+
+**Lifecycle shift (2026-04-24):** The old `enable_gpu_node_group` toggle
++ `terraform apply` dance is gone. Karpenter watches for vllm pods
+requesting `nvidia.com/gpu: 4`, provisions a node to satisfy them, and
+consolidates the node when the pod scales to zero. Demo spin-up is now a
+single `kubectl scale` command.
 
 ## Prerequisites
 
-- Cluster `raj-ai-lab-eks` already running (default node group healthy)
-- `terraform.tfvars` present and gitignored
-- S3 bucket `raj-ai-lab-eks-model-weights` has the Llama 3.3 70B AWQ weights
-  at key prefix `llama-3.3-70b-instruct-awq/` (staged once via
-  `stage-weights-job.yaml`; persistent — only re-run if the model changes)
-- PVC `vllm-model-cache` in namespace `llm` is in AZ matching `var.gpu_az`
-  (defaults to `us-west-2c`). Verify: `kubectl -n llm get pvc vllm-model-cache`
-  then `kubectl get pv <bound-pv-name> -o yaml | grep -A 3 nodeAffinity`.
+- Cluster `raj-ai-lab-eks` running (default node group healthy)
+- Karpenter installed + healthy (`kubectl -n kube-system get pod -l app.kubernetes.io/name=karpenter`)
+- GPU NodePool + EC2NodeClass present (`kubectl get nodepool gpu` / `kubectl get ec2nodeclass gpu`)
+- S3 bucket `raj-ai-lab-eks-model-weights` has the Llama 3.3 70B AWQ
+  weights at key prefix `llama-3.3-70b-instruct-awq/`
+- PVC `vllm-model-cache` in namespace `llm` is in AZ `us-west-2c` (the
+  NodePool is pinned to that zone). Verify:
+  `kubectl get pv $(kubectl -n llm get pvc vllm-model-cache -o jsonpath='{.spec.volumeName}') -o yaml | grep -A 3 nodeAffinity`
 
 ## Spin up
 
+Single command. Steady-state in git is `replicas: 0` on the vllm Deployment
+(raj-ai-lab-eks/llm/base/deployment.yaml) — no pods, no GPU node, no cost.
+The ArgoCD Application for vllm is wired with `ignoreDifferences` on
+`/spec/replicas` + `RespectIgnoreDifferences=true`, so manual `kubectl scale`
+is not reverted by selfHeal.
+
 ```bash
-cd ~/git/raj-ai-lab-eks-infra
+# Scale vllm up. Karpenter sees the Pending pod requesting
+# nvidia.com/gpu: 4 and provisions a GPU node in ~60-90 seconds.
+kubectl -n llm scale deployment vllm --replicas=1
 
-# 1. Flip the GPU toggle in tfvars
-sed -i.bak 's/^enable_gpu_node_group *=.*$/enable_gpu_node_group = true/' terraform.tfvars
-rm -f terraform.tfvars.bak
-grep enable_gpu_node_group terraform.tfvars
+# Watch Karpenter's NodeClaim + actual node come up.
+kubectl get nodeclaims -w
+# (Ctrl-C when the NodeClaim shows ready=True + a node name)
 
-# 2. Apply — expect 2 to add (gpu nodegroup + nvidia-device-plugin helm release)
-terraform apply
-
-# 3. Wait for GPU node join (~2-3 min after apply)
-kubectl get nodes -l nvidia.com/gpu=true -w
-# Ctrl-C when: status is Ready
-
-# 4. Confirm device plugin advertising 4 GPUs (~30s after node Ready)
-GPU_NODE=$(kubectl get nodes -l nvidia.com/gpu=true -o jsonpath='{.items[0].metadata.name}')
-kubectl describe node "$GPU_NODE" | grep -E "Capacity:|Allocatable:" -A 8 | grep nvidia
-# Expect: nvidia.com/gpu: 4 on both Capacity and Allocatable
-
-# 5. Force ArgoCD to sync the vllm Deployment (auto-sync also picks it up within ~3 min)
-kubectl -n argocd patch application vllm --type merge -p '{"operation":{"sync":{}}}'
-
-# 6. Watch pod cold-start flow (total ~8-10 min first time on a fresh node)
+# Then the pod flow:
 kubectl -n llm get pod -l app=vllm -w
 # Expected transitions:
-#   Pending          (scheduler places on GPU node)
-#   Init:0/1         (aws s3 sync to PVC, ~60s or seconds if PVC already warm)
-#   ContainerCreating (~3-5 min, vllm/vllm-openai image pull)
-#   Running 0/1      (~2-3 min, 70B weights load across 4 GPUs)
-#   Running 1/1      (startup probe passed → ready for traffic)
+#   Pending            (waiting for Karpenter → node join, ~60-90s)
+#   Init:0/1           (aws s3 sync to PVC — seconds if PVC is warm)
+#   ContainerCreating  (vllm/vllm-openai image pull)
+#                      * 3-5 min first time on a given node
+#                      * Seconds if the image-prepull DaemonSet got there first
+#   Running 0/1        (2-3 min — 70B loads across 4 GPUs)
+#   Running 1/1        (startup probe passed)
 ```
 
 ## Smoke test
@@ -107,25 +109,17 @@ curl -s https://rag.ekstest.com/invoke \
 ## Shut down
 
 ```bash
-cd ~/git/raj-ai-lab-eks-infra
-
-# 1. Flip GPU toggle off
-sed -i.bak 's/^enable_gpu_node_group *=.*$/enable_gpu_node_group = false/' terraform.tfvars
-rm -f terraform.tfvars.bak
-grep enable_gpu_node_group terraform.tfvars
-
-# 2. If rag-service was set to auto, revert it so Bedrock is the steady state
+# 1. If rag-service was flipped to vllm/auto, revert it so Bedrock is the
+#    steady-state provider.
 kubectl set env deployment/rag-service -n rag LLM_PROVIDER=bedrock
 
-# 3. Apply — expect 2 to destroy (gpu nodegroup + nvidia-device-plugin)
-terraform apply
+# 2. Scale vllm down. Karpenter detects the now-empty GPU node and
+#    consolidates after 30s. Cost clock stops automatically.
+kubectl -n llm scale deployment vllm --replicas=0
 
-# 4. Verify no g5 compute running
-aws eks list-nodegroups --cluster-name raj-ai-lab-eks --output table
-# Expect: only default-...
-
+# 3. Sanity — no g5/g6 instances in any billable state
 aws ec2 describe-instances \
-  --filters "Name=instance-type,Values=g5.12xlarge" \
+  --filters "Name=instance-type,Values=g5.12xlarge,g6.12xlarge" \
             "Name=instance-state-name,Values=running,pending,stopping,stopped" \
   --query 'Reservations[].Instances[].[InstanceId,State.Name]' --output table
 # Expect: empty
@@ -157,29 +151,29 @@ costs ~$2.85.
 
 ## Known gotchas (captured in project memory)
 
-1. **PVC AZ-lock** — the GPU node MUST be in the same AZ as the PVC's EBS
-   volume. `var.gpu_az` in the infra Terraform pins the node group subnets
-   to a single AZ (defaults `us-west-2c`, matching where the PVC currently
-   lives). If the PVC ever gets recreated in a different AZ (deleted, then
-   re-bound by a pod landing elsewhere), update `var.gpu_az` to match.
+1. **PVC AZ-lock** — Karpenter's NodePool requirement
+   `topology.kubernetes.io/zone In [us-west-2c]` pins the GPU node to the
+   same AZ as the vllm-model-cache PVC's EBS volume. If the PVC ever gets
+   recreated in a different AZ (delete + re-bind on a non-2c node), update
+   the NodePool's zone requirement.
 
 2. **`enableServiceLinks: false`** is set on the vllm pod spec — without
    it, Kubernetes injects `VLLM_PORT=tcp://<svc>:8000` (from the
    namespace's own `vllm` Service), which shadows vLLM's native `VLLM_PORT`
    config and crashes engine init with `ValueError`. Don't remove.
 
-3. **Don't combine `disk_size` and `block_device_mappings`** on the GPU
-   nodegroup — this triggered a runaway rolling-update loop on 2026-04-24
-   that burned ~18 g5.12xlarge instances. `block_device_mappings` is the
-   single source of truth for root disk; see eks.tf comments.
+3. **NodePool `limits`** caps total GPU capacity (currently cpu=96,
+   nvidia.com/gpu=8 — max 2 × 4-GPU instances simultaneously). Prevents
+   runaway provisioning if something mass-creates GPU-requesting pods.
+   Bump only deliberately.
 
-4. **`max_size = 1`** on the GPU node group is intentional. No bursting
-   during rolling updates — any LT change terminates then launches, with
-   vllm downtime during replacement. Correct tradeoff for a lab.
+4. **NodePool has `expireAfter: 720h`** — nodes auto-recycle after 30 days.
+   Avoids the 'drift from the latest AL2023 NVIDIA AMI' / 'leak transient
+   CUDA allocation' problems that come with long-lived GPU nodes. For
+   active demos you'll never hit this; just worth knowing.
 
-5. **ASG suspension cleanup** — if you ever manually suspend ASG processes
-   for emergency cost control, make sure to resume `Terminate` +
-   `HealthCheck` + `ReplaceUnhealthy` before asking EKS to delete the
-   nodegroup. `Launch` can stay suspended. Otherwise EKS delete-nodegroup
-   fails with `AutoScalingGroupInvalidConfiguration: Couldn't terminate
-   instances in ASG as Terminate process is suspended`.
+5. **Karpenter needs a reachable default node group to land on** —
+   Karpenter controller pins itself via nodeSelector `workload=general`,
+   which only matches the static m5.xlarge node group. If you ever
+   rename/relabel/remove the default node group, Karpenter pods go
+   Pending → no GPU provisioning happens.

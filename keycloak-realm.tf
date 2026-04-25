@@ -19,7 +19,7 @@ resource "random_password" "keycloak_demo_user_password" {
 # and set KC_SPI_IMPORT_SINGLE_FILE_STRATEGY=OVERWRITE_EXISTING on the pod.
 locals {
   keycloak_realm_json = jsonencode({
-    realm                 = "raj-ai-lab-eks"
+    realm                 = var.cluster_name
     displayName           = "Raj AI Lab (EKS)"
     enabled               = true
     registrationAllowed   = false
@@ -41,9 +41,9 @@ locals {
     users = [
       {
         username      = "raj"
-        email         = "raj@example.com"
-        firstName     = "Raj"
-        lastName      = "Sasidharan"
+        email         = var.keycloak_demo_user_email
+        firstName     = var.keycloak_demo_user_first_name
+        lastName      = var.keycloak_demo_user_last_name
         emailVerified = true
         enabled       = true
         credentials = [{

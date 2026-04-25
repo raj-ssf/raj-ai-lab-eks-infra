@@ -1,35 +1,32 @@
 # Workload-scoped STRICT mTLS + AuthorizationPolicy on internal data tiers.
 #
-# Companion to the qdrant STRICT+AuthZ in istio.tf. Same pattern, different
-# workloads: lock down DB/cache tiers that no unmeshed client ever needs
-# to reach, so STRICT is safe and the AuthZ allowlist is the only path in.
+# Companion to the qdrant STRICT+AuthZ in istio.tf, and the cluster-wide
+# deny-all in istio-zero-trust.tf. The data-tier policies here are the
+# tightest layer — narrower than the ns-wide allows in the zero-trust
+# layer above them. Specifically:
 #
-# Scope chosen with the NGINX-unmeshed constraint in mind:
+#   keycloak-postgres → only the keycloak SA can reach it (not other
+#                       workloads in the keycloak ns)
+#   argocd-redis      → only the three argocd controller SAs can reach
+#                       it (not the argocd-server itself, dex, etc.)
 #
-#   COVERED (STRICT + AuthZ here):
-#     keycloak-postgres  — only caller is keycloak pod
-#     argocd-redis       — only callers are argocd-server, application-
-#                          controller, repo-server
+# Layered policy semantics: Istio evaluates DENY policies first, then
+# ALLOW. The cluster-wide deny-all in istio-system blocks everything
+# by default. Each layer of ALLOW policies opens specific paths:
 #
-#   NOT COVERED (externally-reached via ingress-nginx → workload; STRICT
-#   would reject the plaintext hop from unmeshed NGINX):
-#     rag-service        — takes HTTPS from NGINX → rag.ekstest.com
-#     keycloak pod       — takes HTTPS from NGINX → keycloak login page
-#     argocd-server      — takes HTTPS from NGINX → ArgoCD UI
+#   ns-wide allow      (in istio-zero-trust.tf) opens broad paths like
+#                      "ingress-nginx → anything in this ns" and
+#                      "anything in this ns → anything in this ns"
 #
-#   Adding ALLOW-style AuthZ to PERMISSIVE workloads would be worse than
-#   nothing: unmeshed plaintext has no SPIFFE principal, so an ALLOW policy
-#   with only principal rules would implicitly deny NGINX and break ingress.
-#   Proper fix is meshing ingress-nginx itself (inject sidecar on its ns,
-#   restart pods), which lets NGINX initiate mTLS to workloads. That's its
-#   own milestone — deferred.
-#
-# Net interview narrative: four-tier segmentation today —
-#   qdrant (STRICT, allow=rag-service)
-#   keycloak-postgres (STRICT, allow=keycloak)
-#   argocd-redis (STRICT, allow=argocd-controllers)
-#   + namespace labels + Istio sidecars on 4 namespaces
-# Mesh-wide STRICT is the next fold once NGINX is meshed.
+#   workload-tight     (this file + qdrant in istio.tf) layers on top —
+#                      since multiple ALLOW rules are additive and any
+#                      matching one lets traffic through, the tighter
+#                      rules here are not strictly required for traffic
+#                      to flow. They're kept for the demonstrably-tighter
+#                      narrative ("qdrant only accepts rag-service, not
+#                      every pod in the rag namespace") and so a future
+#                      ns-wide policy revision doesn't accidentally
+#                      widen the data-tier surface.
 
 # =============================================================================
 # keycloak-postgres — internal DB tier, STRICT + AuthZ to keycloak SA
