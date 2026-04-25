@@ -134,6 +134,22 @@ resource "helm_release" "langfuse" {
             name  = "AUTH_KEYCLOAK_ALLOW_ACCOUNT_LINKING"
             value = "true"
           },
+          {
+            # Required to make NextAuth's keycloak provider include
+            # `state` and `code_challenge` (PKCE) in the OAuth
+            # authorization URL. Langfuse's compiled provider
+            # construction passes `checks: process.env.AUTH_KEYCLOAK_CHECKS`
+            # directly to NextAuth — when this env var is unset, the
+            # value is `undefined` which OVERRIDES NextAuth's default
+            # `["pkce", "state"]` to nothing. The resulting bare auth
+            # URL (no state, no code_challenge) is rejected by keycloak
+            # with "Parameter 'client_id' not present or present multiple
+            # times" — misleading message; the real issue is the URL is
+            # missing required OIDC OAuth params. Setting this restores
+            # the standard checks.
+            name  = "AUTH_KEYCLOAK_CHECKS"
+            value = "pkce,state"
+          },
         ]
 
         # Web tier (Next.js frontend + API).
