@@ -254,6 +254,7 @@ locals {
     "keycloak",
     "rag",
     "langfuse",
+    "langgraph",
   ])
 }
 
@@ -312,6 +313,7 @@ locals {
     "keycloak",
     "rag",
     "langfuse",
+    "langgraph",
   ])
 }
 

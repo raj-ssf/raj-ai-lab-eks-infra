@@ -261,6 +261,72 @@ resource "kubectl_manifest" "vllm_app" {
   ]
 }
 
+resource "kubectl_manifest" "langgraph_app" {
+  yaml_body = yamlencode({
+    apiVersion = "argoproj.io/v1alpha1"
+    kind       = "Application"
+    metadata = {
+      name      = "langgraph-service"
+      namespace = kubernetes_namespace.argocd.metadata[0].name
+      finalizers = [
+        "resources-finalizer.argocd.argoproj.io",
+      ]
+    }
+    spec = {
+      project = "default"
+      source = {
+        repoURL        = var.argocd_app_repo_url
+        targetRevision = "HEAD"
+        path           = "langgraph-service/overlays/dev"
+
+        # Env-specific Ingress host injected here (same pattern as
+        # rag-service + vllm). The hostname in the source manifest is
+        # a placeholder that gets replaced per environment without
+        # forking the manifest.
+        kustomize = {
+          patches = [
+            {
+              target = {
+                kind = "Ingress"
+                name = "langgraph-service"
+              }
+              patch = <<-EOT
+                - op: replace
+                  path: /spec/tls/0/hosts/0
+                  value: langgraph.${var.domain}
+                - op: replace
+                  path: /spec/rules/0/host
+                  value: langgraph.${var.domain}
+              EOT
+            },
+          ]
+        }
+      }
+      destination = {
+        server    = "https://kubernetes.default.svc"
+        namespace = "langgraph"
+      }
+      syncPolicy = {
+        automated = {
+          prune    = true
+          selfHeal = true
+        }
+        syncOptions = [
+          "CreateNamespace=true",
+          "PrunePropagationPolicy=foreground",
+          "RespectIgnoreDifferences=true",
+        ]
+      }
+    }
+  })
+
+  depends_on = [
+    helm_release.argocd,
+    kubernetes_secret.argocd_app_repo,
+    kubernetes_namespace.langgraph,
+  ]
+}
+
 resource "kubectl_manifest" "qdrant_app" {
   yaml_body = yamlencode({
     apiVersion = "argoproj.io/v1alpha1"
