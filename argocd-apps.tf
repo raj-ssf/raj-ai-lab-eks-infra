@@ -233,6 +233,13 @@ resource "kubectl_manifest" "vllm_app" {
           namespace    = "llm"
           jsonPointers = ["/spec/replicas"]
         },
+        {
+          group        = "apps"
+          kind         = "Deployment"
+          name         = "vllm-deepseek-r1-70b"
+          namespace    = "llm"
+          jsonPointers = ["/spec/replicas"]
+        },
       ]
       syncPolicy = {
         automated = {
