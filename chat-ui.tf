@@ -159,7 +159,17 @@ resource "keycloak_openid_client" "chat_ui" {
   direct_access_grants_enabled = false
   service_accounts_enabled     = false
 
-  pkce_code_challenge_method = "S256"
+  # PKCE intentionally NOT required. Chainlit's KeycloakOAuthProvider
+  # (chainlit/oauth_providers.py) doesn't send code_challenge /
+  # code_challenge_method on the authorize request. With PKCE required
+  # here, Keycloak rejects every authorize request with
+  # `error=invalid_request` and the user lands at /login?error=invalid_request.
+  #
+  # PKCE is redundant for CONFIDENTIAL clients anyway: the threat model
+  # PKCE protects against (intercepted auth code → token without a
+  # secret) doesn't apply when the client authenticates to the token
+  # endpoint with client_secret. Re-enable when Chainlit ships PKCE
+  # support upstream.
 
   root_url = "https://chat.${var.domain}"
   base_url = "https://chat.${var.domain}"
