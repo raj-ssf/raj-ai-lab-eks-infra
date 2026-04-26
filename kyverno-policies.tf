@@ -116,3 +116,142 @@ resource "kubectl_manifest" "kyverno_verify_rag_service_image" {
     helm_release.kyverno,
   ]
 }
+
+# =============================================================================
+# Mirror of verify-rag-service-image-signature, scoped to langgraph-service
+# images. Same rationale, same enforcement posture (Enforce + mutateDigest).
+# Kept as a separate ClusterPolicy rather than expanding the rag-service
+# policy's imageReferences glob because:
+#   - Each service has a distinct GHA workflow signing identity
+#     (different workflow file path) → distinct attestor subject.
+#   - Adding a service this way produces a clean per-service status in
+#     Kyverno policy reports, not a single combined view.
+# =============================================================================
+
+resource "kubectl_manifest" "kyverno_verify_langgraph_service_image" {
+  yaml_body = yamlencode({
+    apiVersion = "kyverno.io/v1"
+    kind       = "ClusterPolicy"
+    metadata = {
+      name = "verify-langgraph-service-image-signature"
+    }
+    spec = {
+      validationFailureAction = "Enforce"
+      background              = true
+      webhookTimeoutSeconds   = 30
+      failurePolicy           = "Fail"
+
+      rules = [
+        {
+          name = "verify-cosign-signature"
+          match = {
+            any = [
+              {
+                resources = {
+                  kinds      = ["Pod"]
+                  operations = ["CREATE"]
+                }
+              },
+            ]
+          }
+          verifyImages = [
+            {
+              imageReferences = [
+                "${aws_ecr_repository.langgraph_service.repository_url}*",
+              ]
+              mutateDigest = true
+              attestors = [
+                {
+                  entries = [
+                    {
+                      keyless = {
+                        subject = "https://github.com/${var.gha_repo_owner}/${var.gha_repo_name}/.github/workflows/build-push-langgraph-service.yml@refs/heads/main"
+                        issuer  = "https://token.actions.githubusercontent.com"
+                        rekor = {
+                          url = "https://rekor.sigstore.dev"
+                        }
+                      }
+                    },
+                  ]
+                },
+              ]
+            },
+          ]
+        },
+      ]
+    }
+  })
+
+  depends_on = [
+    helm_release.kyverno,
+    aws_ecr_repository.langgraph_service,
+  ]
+}
+
+# =============================================================================
+# Mirror of verify-langgraph-service-image-signature, scoped to chat-ui
+# images. Same rationale, same enforcement posture (Enforce + mutateDigest).
+# Per-service ClusterPolicy (rather than expanding an existing policy's
+# imageReferences glob) because each service's GHA workflow file has a
+# distinct OIDC identity → distinct attestor subject.
+# =============================================================================
+
+resource "kubectl_manifest" "kyverno_verify_chat_ui_image" {
+  yaml_body = yamlencode({
+    apiVersion = "kyverno.io/v1"
+    kind       = "ClusterPolicy"
+    metadata = {
+      name = "verify-chat-ui-image-signature"
+    }
+    spec = {
+      validationFailureAction = "Enforce"
+      background              = true
+      webhookTimeoutSeconds   = 30
+      failurePolicy           = "Fail"
+
+      rules = [
+        {
+          name = "verify-cosign-signature"
+          match = {
+            any = [
+              {
+                resources = {
+                  kinds      = ["Pod"]
+                  operations = ["CREATE"]
+                }
+              },
+            ]
+          }
+          verifyImages = [
+            {
+              imageReferences = [
+                "${aws_ecr_repository.chat_ui.repository_url}*",
+              ]
+              mutateDigest = true
+              attestors = [
+                {
+                  entries = [
+                    {
+                      keyless = {
+                        subject = "https://github.com/${var.gha_repo_owner}/${var.gha_repo_name}/.github/workflows/build-push-chat-ui.yml@refs/heads/main"
+                        issuer  = "https://token.actions.githubusercontent.com"
+                        rekor = {
+                          url = "https://rekor.sigstore.dev"
+                        }
+                      }
+                    },
+                  ]
+                },
+              ]
+            },
+          ]
+        },
+      ]
+    }
+  })
+
+  depends_on = [
+    helm_release.kyverno,
+    aws_ecr_repository.chat_ui,
+  ]
+}

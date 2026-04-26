@@ -145,6 +145,7 @@ locals {
     "qdrant",
     "keycloak",
     "argocd",
+    "langgraph",
   ])
 }
 

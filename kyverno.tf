@@ -35,8 +35,18 @@ resource "aws_iam_policy" "kyverno_ecr_read" {
           "ecr:GetDownloadUrlForLayer",
           "ecr:DescribeImages",
         ]
-        # Scoped to the rag-service repo; widen when more repos need signing.
-        Resource = aws_ecr_repository.rag_service.arn
+        # Widened 2026-04-25 to include langgraph-service alongside
+        # rag-service, and 2026-04-26 to include chat-ui. Unlike the
+        # GHA push roles (which we split per-service for least-
+        # privilege isolation), Kyverno runs a single admission-
+        # controller pod with a single IAM role — can't split per-
+        # service. New signed-image workloads need to be added here
+        # when they enter Enforce mode.
+        Resource = [
+          aws_ecr_repository.rag_service.arn,
+          aws_ecr_repository.langgraph_service.arn,
+          aws_ecr_repository.chat_ui.arn,
+        ]
       },
     ]
   })

@@ -38,10 +38,21 @@ resource "helm_release" "nvidia_device_plugin" {
       nodeSelector = {
         "nvidia.com/gpu" = "true"
       }
-      # Tolerate the GPU taint so the DS pods actually land on tainted nodes.
+      # Tolerate every taint any GPU node may carry. The default `gpu`
+      # NodePool only adds `nvidia.com/gpu`, but `gpu-experiments` (see
+      # karpenter-nodepool.tf) also adds `gpu-experiment` for opt-in
+      # workload isolation. Without the second toleration here, the
+      # device plugin DS skips experiments-pool nodes entirely, GPUs
+      # are never advertised on them, and any pod targeting that pool
+      # stays Pending forever with `Insufficient nvidia.com/gpu`.
       tolerations = [
         {
           key      = "nvidia.com/gpu"
+          operator = "Exists"
+          effect   = "NoSchedule"
+        },
+        {
+          key      = "gpu-experiment"
           operator = "Exists"
           effect   = "NoSchedule"
         },

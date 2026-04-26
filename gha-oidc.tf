@@ -75,3 +75,85 @@ output "gha_rag_service_role_arn" {
   value       = aws_iam_role.gha_rag_service.arn
   description = "Paste into the GitHub Actions workflow's role-to-assume field"
 }
+
+# =============================================================================
+# Per-service IAM role for langgraph-service GHA pushes.
+#
+# Mirrors the gha_rag_service shape — separate role + policy + policy
+# attachment, scoped to the langgraph-service ECR repo only. The
+# trust policy restricts assumption to workflows in the same
+# <gha_repo_owner>/<gha_repo_name> on the main branch (same
+# constraint as rag-service); for tighter scoping we'd add a
+# job_workflow_ref condition restricting to this specific workflow
+# file, but that's a follow-up hardening.
+#
+# Why per-service rather than one shared role: each workload gets
+# its own IAM identity, so a compromise of one service's GHA
+# secrets/permissions doesn't grant push access to other services'
+# repos. Standard "least-privilege per workload" pattern.
+# =============================================================================
+
+resource "aws_iam_role" "gha_langgraph_service" {
+  name        = "${var.cluster_name}-gha-langgraph-service"
+  description = "Assumed by GHA build-push-langgraph-service workflow to push images to ECR"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Principal = {
+        Federated = data.aws_iam_openid_connect_provider.github.arn
+      }
+      Action = "sts:AssumeRoleWithWebIdentity"
+      Condition = {
+        StringEquals = {
+          "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
+        }
+        StringLike = {
+          "token.actions.githubusercontent.com:sub" = "repo:${var.gha_repo_owner}/${var.gha_repo_name}:ref:refs/heads/main"
+        }
+      }
+    }]
+  })
+}
+
+resource "aws_iam_policy" "gha_langgraph_service_ecr" {
+  name        = "${var.cluster_name}-gha-langgraph-service-ecr"
+  description = "ECR push permissions for langgraph-service repo"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid      = "AuthToken"
+        Effect   = "Allow"
+        Action   = "ecr:GetAuthorizationToken"
+        Resource = "*"
+      },
+      {
+        Sid    = "PushToLangGraphServiceRepo"
+        Effect = "Allow"
+        Action = [
+          "ecr:BatchCheckLayerAvailability",
+          "ecr:BatchGetImage",
+          "ecr:CompleteLayerUpload",
+          "ecr:GetDownloadUrlForLayer",
+          "ecr:InitiateLayerUpload",
+          "ecr:PutImage",
+          "ecr:UploadLayerPart",
+        ]
+        Resource = aws_ecr_repository.langgraph_service.arn
+      },
+    ]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "gha_langgraph_service_ecr" {
+  role       = aws_iam_role.gha_langgraph_service.name
+  policy_arn = aws_iam_policy.gha_langgraph_service_ecr.arn
+}
+
+output "gha_langgraph_service_role_arn" {
+  value       = aws_iam_role.gha_langgraph_service.arn
+  description = "Set as the LANGGRAPH_AWS_ROLE_ARN repo variable in GitHub Actions"
+}

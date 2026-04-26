@@ -31,9 +31,17 @@ resource "helm_release" "dcgm_exporter" {
       nodeSelector = {
         "nvidia.com/gpu" = "true"
       }
+      # Mirror the device-plugin toleration set: GPU metrics need to be
+      # collected on every GPU node, including experiments-pool nodes
+      # that carry the additional `gpu-experiment` taint.
       tolerations = [
         {
           key      = "nvidia.com/gpu"
+          operator = "Exists"
+          effect   = "NoSchedule"
+        },
+        {
+          key      = "gpu-experiment"
           operator = "Exists"
           effect   = "NoSchedule"
         },

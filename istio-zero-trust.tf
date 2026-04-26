@@ -83,11 +83,23 @@ locals {
   # TLS forcing. Format: key = display name, value = (namespace, service-name).
   # The DestinationRule's `host` is constructed as
   # `<service>.<namespace>.svc.cluster.local` (Istio's canonical FQDN).
+  #
+  # Inclusion criterion: the destination Service's pods MUST be meshed
+  # (have an istio-proxy sidecar). Forcing ISTIO_MUTUAL to an unmeshed
+  # destination produces "TLS_error: WRONG_VERSION_NUMBER" because the
+  # destination has no sidecar to terminate mTLS — Envoy returns 503 to
+  # both internal callers AND the ingress-nginx hop.
+  #
+  # langfuse-web is intentionally absent: the langfuse Helm chart's pods
+  # are unmeshed (the langfuse namespace has no istio-injection label,
+  # because mTLS-wrapping its Postgres/ClickHouse/Redis traffic would
+  # break those non-HTTP protocols). Add langfuse-web back here only if
+  # the langfuse namespace is later mesh-injected.
   force_mtls_targets = {
     argocd-server = { namespace = "argocd",   service = "argocd-server" }
     keycloak      = { namespace = "keycloak", service = "keycloak" }
     rag-service   = { namespace = "rag",      service = "rag-service" }
-    langfuse-web  = { namespace = "langfuse", service = "langfuse-web" }
+    chat-ui       = { namespace = "chat",     service = "chat-ui" }
   }
 }
 
@@ -254,6 +266,8 @@ locals {
     "keycloak",
     "rag",
     "langfuse",
+    "langgraph",
+    "chat",
   ])
 }
 
@@ -312,6 +326,7 @@ locals {
     "keycloak",
     "rag",
     "langfuse",
+    "langgraph",
   ])
 }
 
@@ -374,6 +389,46 @@ resource "kubectl_manifest" "allow_rag_to_langfuse" {
             source = {
               principals = [
                 "cluster.local/ns/rag/sa/rag-service",
+              ]
+            }
+          }]
+        },
+      ]
+    }
+  })
+
+  depends_on = [
+    helm_release.istiod,
+    kubectl_manifest.deny_all_mesh_wide,
+  ]
+}
+
+# =============================================================================
+# Cross-namespace ALLOW: langgraph-service → langfuse-web.
+#
+# Same shape as allow_rag_to_langfuse above. langgraph-service's Langfuse
+# v3 callback handler emits trace events to langfuse-web on every graph
+# run; without this rule, mesh-wide deny-all blocks the connection at
+# Envoy and the SDK silently drops spans. Scoped to the SA so only the
+# intended workload uses the cross-namespace path.
+# =============================================================================
+
+resource "kubectl_manifest" "allow_langgraph_to_langfuse" {
+  yaml_body = yamlencode({
+    apiVersion = "security.istio.io/v1"
+    kind       = "AuthorizationPolicy"
+    metadata = {
+      name      = "allow-langgraph-service"
+      namespace = "langfuse"
+    }
+    spec = {
+      action = "ALLOW"
+      rules = [
+        {
+          from = [{
+            source = {
+              principals = [
+                "cluster.local/ns/langgraph/sa/langgraph-service",
               ]
             }
           }]
