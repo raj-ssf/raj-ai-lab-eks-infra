@@ -389,3 +389,43 @@ resource "kubectl_manifest" "allow_rag_to_langfuse" {
     kubectl_manifest.deny_all_mesh_wide,
   ]
 }
+
+# =============================================================================
+# Cross-namespace ALLOW: langgraph-service → langfuse-web.
+#
+# Same shape as allow_rag_to_langfuse above. langgraph-service's Langfuse
+# v3 callback handler emits trace events to langfuse-web on every graph
+# run; without this rule, mesh-wide deny-all blocks the connection at
+# Envoy and the SDK silently drops spans. Scoped to the SA so only the
+# intended workload uses the cross-namespace path.
+# =============================================================================
+
+resource "kubectl_manifest" "allow_langgraph_to_langfuse" {
+  yaml_body = yamlencode({
+    apiVersion = "security.istio.io/v1"
+    kind       = "AuthorizationPolicy"
+    metadata = {
+      name      = "allow-langgraph-service"
+      namespace = "langfuse"
+    }
+    spec = {
+      action = "ALLOW"
+      rules = [
+        {
+          from = [{
+            source = {
+              principals = [
+                "cluster.local/ns/langgraph/sa/langgraph-service",
+              ]
+            }
+          }]
+        },
+      ]
+    }
+  })
+
+  depends_on = [
+    helm_release.istiod,
+    kubectl_manifest.deny_all_mesh_wide,
+  ]
+}
