@@ -42,9 +42,19 @@ resource "kubectl_manifest" "vllm_image_prepull" {
           nodeSelector = {
             "nvidia.com/gpu.present" = "true"
           }
+          # Tolerate both GPU taints — the default `gpu` NodePool sets
+          # only `nvidia.com/gpu`, but `gpu-experiments` also sets
+          # `gpu-experiment`. Pre-pulling on experiment nodes is what
+          # lets the model-axis variants (vllm-llama-8b, etc.) skip the
+          # 3-min vllm/vllm-openai cold pull on every fresh provision.
           tolerations = [
             {
               key      = "nvidia.com/gpu"
+              operator = "Exists"
+              effect   = "NoSchedule"
+            },
+            {
+              key      = "gpu-experiment"
               operator = "Exists"
               effect   = "NoSchedule"
             },
