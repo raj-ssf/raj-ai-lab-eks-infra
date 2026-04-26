@@ -327,6 +327,72 @@ resource "kubectl_manifest" "langgraph_app" {
   ]
 }
 
+resource "kubectl_manifest" "chat_ui_app" {
+  yaml_body = yamlencode({
+    apiVersion = "argoproj.io/v1alpha1"
+    kind       = "Application"
+    metadata = {
+      name      = "chat-ui"
+      namespace = kubernetes_namespace.argocd.metadata[0].name
+      finalizers = [
+        "resources-finalizer.argocd.argoproj.io",
+      ]
+    }
+    spec = {
+      project = "default"
+      source = {
+        repoURL        = var.argocd_app_repo_url
+        targetRevision = "HEAD"
+        path           = "chat-ui/overlays/dev"
+
+        # Env-specific Ingress host injected here (same pattern as
+        # langgraph-service / rag-service / vllm). The hostname in the
+        # source manifest is a placeholder that gets replaced per
+        # environment without forking the manifest.
+        kustomize = {
+          patches = [
+            {
+              target = {
+                kind = "Ingress"
+                name = "chat-ui"
+              }
+              patch = <<-EOT
+                - op: replace
+                  path: /spec/tls/0/hosts/0
+                  value: chat.${var.domain}
+                - op: replace
+                  path: /spec/rules/0/host
+                  value: chat.${var.domain}
+              EOT
+            },
+          ]
+        }
+      }
+      destination = {
+        server    = "https://kubernetes.default.svc"
+        namespace = "chat"
+      }
+      syncPolicy = {
+        automated = {
+          prune    = true
+          selfHeal = true
+        }
+        syncOptions = [
+          "CreateNamespace=true",
+          "PrunePropagationPolicy=foreground",
+          "RespectIgnoreDifferences=true",
+        ]
+      }
+    }
+  })
+
+  depends_on = [
+    helm_release.argocd,
+    kubernetes_secret.argocd_app_repo,
+    kubernetes_namespace.chat,
+  ]
+}
+
 resource "kubectl_manifest" "qdrant_app" {
   yaml_body = yamlencode({
     apiVersion = "argoproj.io/v1alpha1"
