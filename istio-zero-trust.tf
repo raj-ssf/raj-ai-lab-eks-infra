@@ -99,6 +99,7 @@ locals {
     argocd-server = { namespace = "argocd",   service = "argocd-server" }
     keycloak      = { namespace = "keycloak", service = "keycloak" }
     rag-service   = { namespace = "rag",      service = "rag-service" }
+    chat-ui       = { namespace = "chat",     service = "chat-ui" }
   }
 }
 
@@ -266,6 +267,7 @@ locals {
     "rag",
     "langfuse",
     "langgraph",
+    "chat",
   ])
 }
 
