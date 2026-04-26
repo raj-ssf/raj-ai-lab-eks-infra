@@ -255,3 +255,69 @@ resource "kubectl_manifest" "kyverno_verify_chat_ui_image" {
     aws_ecr_repository.chat_ui,
   ]
 }
+
+# =============================================================================
+# Mirror of verify-chat-ui-image-signature, scoped to ingestion-service.
+# Same shape: per-service ClusterPolicy (each service's GHA workflow has
+# a distinct attestor subject) + Enforce mode + mutateDigest.
+# =============================================================================
+
+resource "kubectl_manifest" "kyverno_verify_ingestion_service_image" {
+  yaml_body = yamlencode({
+    apiVersion = "kyverno.io/v1"
+    kind       = "ClusterPolicy"
+    metadata = {
+      name = "verify-ingestion-service-image-signature"
+    }
+    spec = {
+      validationFailureAction = "Enforce"
+      background              = true
+      webhookTimeoutSeconds   = 30
+      failurePolicy           = "Fail"
+
+      rules = [
+        {
+          name = "verify-cosign-signature"
+          match = {
+            any = [
+              {
+                resources = {
+                  kinds      = ["Pod"]
+                  operations = ["CREATE"]
+                }
+              },
+            ]
+          }
+          verifyImages = [
+            {
+              imageReferences = [
+                "${aws_ecr_repository.ingestion_service.repository_url}*",
+              ]
+              mutateDigest = true
+              attestors = [
+                {
+                  entries = [
+                    {
+                      keyless = {
+                        subject = "https://github.com/${var.gha_repo_owner}/${var.gha_repo_name}/.github/workflows/build-push-ingestion-service.yml@refs/heads/main"
+                        issuer  = "https://token.actions.githubusercontent.com"
+                        rekor = {
+                          url = "https://rekor.sigstore.dev"
+                        }
+                      }
+                    },
+                  ]
+                },
+              ]
+            },
+          ]
+        },
+      ]
+    }
+  })
+
+  depends_on = [
+    helm_release.kyverno,
+    aws_ecr_repository.ingestion_service,
+  ]
+}

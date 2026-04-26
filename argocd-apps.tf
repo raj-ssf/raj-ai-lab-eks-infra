@@ -240,6 +240,13 @@ resource "kubectl_manifest" "vllm_app" {
           namespace    = "llm"
           jsonPointers = ["/spec/replicas"]
         },
+        {
+          group        = "apps"
+          kind         = "Deployment"
+          name         = "vllm-bge-m3"
+          namespace    = "llm"
+          jsonPointers = ["/spec/replicas"]
+        },
       ]
       syncPolicy = {
         automated = {
@@ -435,5 +442,50 @@ resource "kubectl_manifest" "qdrant_app" {
   depends_on = [
     helm_release.argocd,
     kubernetes_secret.argocd_app_repo,
+  ]
+}
+
+resource "kubectl_manifest" "ingestion_service_app" {
+  yaml_body = yamlencode({
+    apiVersion = "argoproj.io/v1alpha1"
+    kind       = "Application"
+    metadata = {
+      name      = "ingestion-service"
+      namespace = kubernetes_namespace.argocd.metadata[0].name
+      finalizers = [
+        "resources-finalizer.argocd.argoproj.io",
+      ]
+    }
+    spec = {
+      project = "default"
+      source = {
+        repoURL        = var.argocd_app_repo_url
+        targetRevision = "HEAD"
+        path           = "ingestion-service/overlays/dev"
+        # No Ingress to patch — ingestion-service is in-cluster only;
+        # chat-ui calls it via the K8s Service URL.
+      }
+      destination = {
+        server    = "https://kubernetes.default.svc"
+        namespace = "ingestion"
+      }
+      syncPolicy = {
+        automated = {
+          prune    = true
+          selfHeal = true
+        }
+        syncOptions = [
+          "CreateNamespace=true",
+          "PrunePropagationPolicy=foreground",
+          "RespectIgnoreDifferences=true",
+        ]
+      }
+    }
+  })
+
+  depends_on = [
+    helm_release.argocd,
+    kubernetes_secret.argocd_app_repo,
+    kubernetes_namespace.ingestion,
   ]
 }

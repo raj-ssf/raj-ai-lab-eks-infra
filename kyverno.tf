@@ -46,6 +46,7 @@ resource "aws_iam_policy" "kyverno_ecr_read" {
           aws_ecr_repository.rag_service.arn,
           aws_ecr_repository.langgraph_service.arn,
           aws_ecr_repository.chat_ui.arn,
+          aws_ecr_repository.ingestion_service.arn,
         ]
       },
     ]
