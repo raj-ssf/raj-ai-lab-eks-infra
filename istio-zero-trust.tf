@@ -443,6 +443,49 @@ resource "kubectl_manifest" "allow_langgraph_to_langfuse" {
   ]
 }
 
+# Phase 4: rag-service's new /retrieve endpoint embeds queries via
+# vllm-bge-m3 in the llm namespace. The mesh-wide deny-all blocks
+# rag's SA from reaching llm's pods; this allow rule unblocks it.
+#
+# Sits alongside the existing allow-ingestion-service policy in the
+# llm ns (see ingestion-service.tf). Istio combines multiple ALLOW
+# rules with OR semantics — naming this policy distinctly
+# (allow-rag-service vs. allow-ingestion-service) keeps the two
+# producers' permissions independent and easy to revoke individually.
+#
+# This is the symmetric counterpart of allow-rag-service-only on the
+# qdrant side: rag-service was always allowed into qdrant; today's
+# add gives it the embedder it needs to BUILD the query vector first.
+resource "kubectl_manifest" "allow_rag_to_llm" {
+  yaml_body = yamlencode({
+    apiVersion = "security.istio.io/v1"
+    kind       = "AuthorizationPolicy"
+    metadata = {
+      name      = "allow-rag-service"
+      namespace = "llm"
+    }
+    spec = {
+      action = "ALLOW"
+      rules = [
+        {
+          from = [{
+            source = {
+              principals = [
+                "cluster.local/ns/rag/sa/rag-service",
+              ]
+            }
+          }]
+        },
+      ]
+    }
+  })
+
+  depends_on = [
+    helm_release.istiod,
+    kubectl_manifest.deny_all_mesh_wide,
+  ]
+}
+
 # Phase 4: langgraph-service's retrieve node calls rag-service /retrieve
 # for per-session RAG. The mesh-wide deny-all blocks this east-west hop
 # by default; this policy allows the langgraph SA into the rag namespace.
