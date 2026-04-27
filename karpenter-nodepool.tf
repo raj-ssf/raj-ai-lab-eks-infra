@@ -262,6 +262,12 @@ resource "kubectl_manifest" "karpenter_nodepool_gpu_experiments" {
                 # fall back to the triton path on Turing (no INT4
                 # tensor cores). Interesting data-point either way.
                 "g4dn.12xlarge",   # 4× T4 16GB (Turing)
+                # 1× L4 24GB (Ada) — cheapest GPU in the allowlist.
+                # Used by vllm-bge-m3 (~5 GB working set fits in 24 GB
+                # comfortably). NOT suitable for 70B AWQ — quantized 70B
+                # plus KV cache exceeds L4's 24 GB. Reserved for the
+                # embedding tier and any future small-model variants.
+                "g6.xlarge",       # 1× L4 24GB (Ada) — $0.80/hr
                 # 1-GPU cheapest single-GPU path for quantized 70B.
                 # Requires --tensor-parallel-size=1.
                 "g6e.xlarge",      # 1× L40S 48GB (Ada)
