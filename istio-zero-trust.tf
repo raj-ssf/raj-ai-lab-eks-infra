@@ -442,3 +442,49 @@ resource "kubectl_manifest" "allow_langgraph_to_langfuse" {
     kubectl_manifest.deny_all_mesh_wide,
   ]
 }
+
+# Phase 4: langgraph-service's retrieve node calls rag-service /retrieve
+# for per-session RAG. The mesh-wide deny-all blocks this east-west hop
+# by default; this policy allows the langgraph SA into the rag namespace.
+# Scoped to the rag-service workload via app=rag-service selector so the
+# rule survives if other (less-trusted) workloads ever land in rag ns.
+resource "kubectl_manifest" "allow_langgraph_to_rag" {
+  yaml_body = yamlencode({
+    apiVersion = "security.istio.io/v1"
+    kind       = "AuthorizationPolicy"
+    metadata = {
+      name      = "allow-langgraph-service"
+      namespace = "rag"
+    }
+    spec = {
+      selector = {
+        matchLabels = {
+          app = "rag-service"
+        }
+      }
+      action = "ALLOW"
+      rules = [
+        {
+          from = [{
+            source = {
+              principals = [
+                "cluster.local/ns/langgraph/sa/langgraph-service",
+              ]
+            }
+          }]
+          to = [{
+            operation = {
+              methods = ["POST"]
+              paths   = ["/retrieve"]
+            }
+          }]
+        },
+      ]
+    }
+  })
+
+  depends_on = [
+    helm_release.istiod,
+    kubectl_manifest.deny_all_mesh_wide,
+  ]
+}
