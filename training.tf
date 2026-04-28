@@ -137,6 +137,25 @@ resource "aws_eks_pod_identity_association" "training_pod" {
   role_arn        = aws_iam_role.training_pod.arn
 }
 
+# The ServiceAccount the PyTorchJob references. Pod Identity binds an
+# IAM role to the (cluster, namespace, SA-name) tuple via
+# aws_eks_pod_identity_association above — but that does NOT create the
+# K8s ServiceAccount object itself. Other Pod Identity workloads in this
+# lab (vllm, langfuse, etc.) get their SA from a Helm chart's
+# serviceAccount.create=true. Training has no chart — the workload is a
+# raw PyTorchJob YAML — so we declare the SA here in TF.
+#
+# No annotations needed: Pod Identity uses the EKS Pod Identity webhook,
+# which keys off the association (not the SA annotation). This is the
+# advantage over IRSA — no eks.amazonaws.com/role-arn annotation that
+# ArgoCD or other reconcilers might strip.
+resource "kubernetes_service_account" "training_pod" {
+  metadata {
+    name      = "training-pod"
+    namespace = kubernetes_namespace.training.metadata[0].name
+  }
+}
+
 # ---------------------------------------------------------------------------
 # vLLM read access on adapters/* — extends the existing vllm IAM role
 # (model-weights.tf) with a scoped policy. No new ServiceAccount needed;
