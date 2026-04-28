@@ -100,10 +100,19 @@ resource "kubectl_manifest" "shared_gateway" {
           allowedRoutes = {
             namespaces = {
               from = "Selector"
+              # Match by the auto-applied kubernetes.io/metadata.name
+              # label (managed by Kubernetes itself, never stripped),
+              # rather than a user-applied gateway-access=enabled label
+              # (which ArgoCD's CreateNamespace=true syncOption strips
+              # when reconciling the per-app Application). Each new
+              # migrated app gets added to this In-list — explicit
+              # opt-in by namespace name, no namespace-label dance.
               selector = {
-                matchLabels = {
-                  "gateway-access" = "enabled"
-                }
+                matchExpressions = [{
+                  key      = "kubernetes.io/metadata.name"
+                  operator = "In"
+                  values   = ["rag", "langgraph"]
+                }]
               }
             }
           }
@@ -130,10 +139,19 @@ resource "kubectl_manifest" "shared_gateway" {
           allowedRoutes = {
             namespaces = {
               from = "Selector"
+              # Match by the auto-applied kubernetes.io/metadata.name
+              # label (managed by Kubernetes itself, never stripped),
+              # rather than a user-applied gateway-access=enabled label
+              # (which ArgoCD's CreateNamespace=true syncOption strips
+              # when reconciling the per-app Application). Each new
+              # migrated app gets added to this In-list — explicit
+              # opt-in by namespace name, no namespace-label dance.
               selector = {
-                matchLabels = {
-                  "gateway-access" = "enabled"
-                }
+                matchExpressions = [{
+                  key      = "kubernetes.io/metadata.name"
+                  operator = "In"
+                  values   = ["rag", "langgraph"]
+                }]
               }
             }
           }
@@ -359,28 +377,13 @@ resource "kubectl_manifest" "rag_authz_allow_gateway" {
   ]
 }
 
-# Label the rag namespace so HTTPRoutes there can attach to
-# shared-gateway via parentRef. This is the opt-in mechanism for
-# cross-namespace route attachment under Gateway API. Without this
-# label, the Gateway's allowedRoutes.namespaces.selector won't
-# match rag, and any HTTPRoute attempting to attach will be
-# rejected with status condition Accepted=False, reason=NotAllowedByListeners.
-resource "kubernetes_labels" "rag_gateway_access" {
-  api_version = "v1"
-  kind        = "Namespace"
-  metadata {
-    name = "rag"
-  }
-  labels = {
-    "gateway-access" = "enabled"
-  }
-  force         = true
-  field_manager = "terraform-raj-ai-lab"
-
-  depends_on = [
-    kubectl_manifest.shared_gateway,
-  ]
-}
+# Note: the previous kubernetes_labels.rag_gateway_access /
+# langgraph_gateway_access resources have been REMOVED. They applied
+# `gateway-access=enabled` to the rag/langgraph namespaces, which
+# ArgoCD's CreateNamespace=true syncOption stripped on every sync.
+# The Gateway's allowedRoutes selector now matches on the
+# auto-applied kubernetes.io/metadata.name label instead — managed
+# by Kubernetes itself, ArgoCD-immune.
 
 # =============================================================================
 # Phase 4: langgraph-service per-app resources.
@@ -446,19 +449,5 @@ resource "kubectl_manifest" "langgraph_authz_allow_gateway" {
   ]
 }
 
-resource "kubernetes_labels" "langgraph_gateway_access" {
-  api_version = "v1"
-  kind        = "Namespace"
-  metadata {
-    name = "langgraph"
-  }
-  labels = {
-    "gateway-access" = "enabled"
-  }
-  force         = true
-  field_manager = "terraform-raj-ai-lab"
-
-  depends_on = [
-    kubectl_manifest.shared_gateway,
-  ]
-}
+# (langgraph_gateway_access kubernetes_labels resource removed
+# — same rationale as rag_gateway_access removal above.)
