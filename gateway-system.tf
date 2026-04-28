@@ -52,65 +52,93 @@ resource "kubernetes_namespace" "gateway_system" {
 # =============================================================================
 
 locals {
+  # Schema (post-Phase 10 refactor):
+  #   - hostnames: list of hostnames this app serves. Most apps have
+  #     one; hello has two (hello.ekstest.com + hello2.ekstest.com).
+  #     Listener names are derived as "${first-segment-of-hostname}-https"
+  #     so naming stays predictable + readable.
+  #   - cert_secret_name: shared by ALL hostnames in this entry. If an
+  #     app needs different certs per hostname, it would be split into
+  #     multiple map entries.
+  #   - namespace: where the cert Secret + backend Service live, and
+  #     where the per-app ReferenceGrant + AuthZ are emitted by the
+  #     gateway-app module.
   gateway_apps = {
     rag = {
       namespace        = "rag"
-      hostname         = "rag.ekstest.com"
+      hostnames        = ["rag.ekstest.com"]
       cert_secret_name = "rag-tls"
-      listener_name    = "rag-https"
     }
     langgraph = {
       namespace        = "langgraph"
-      hostname         = "langgraph.ekstest.com"
+      hostnames        = ["langgraph.ekstest.com"]
       cert_secret_name = "langgraph-service-tls"
-      listener_name    = "langgraph-https"
     }
     chat = {
       namespace        = "chat"
-      hostname         = "chat.ekstest.com"
+      hostnames        = ["chat.ekstest.com"]
       cert_secret_name = "chat-ui-tls"
-      listener_name    = "chat-https"
     }
     llm = {
       namespace        = "llm"
-      hostname         = "llm.ekstest.com"
+      hostnames        = ["llm.ekstest.com"]
       cert_secret_name = "vllm-tls"
-      listener_name    = "llm-https"
     }
     langfuse = {
       namespace        = "langfuse"
-      hostname         = "langfuse.ekstest.com"
+      hostnames        = ["langfuse.ekstest.com"]
       cert_secret_name = "langfuse-tls"
-      listener_name    = "langfuse-https"
     }
     grafana = {
       namespace        = "monitoring"
-      hostname         = "grafana.ekstest.com"
+      hostnames        = ["grafana.ekstest.com"]
       cert_secret_name = "grafana-tls"
-      listener_name    = "grafana-https"
     }
     vault = {
       namespace        = "vault"
-      hostname         = "vault.ekstest.com"
+      hostnames        = ["vault.ekstest.com"]
       cert_secret_name = "vault-tls"
-      listener_name    = "vault-https"
     }
     argocd = {
-      namespace        = "argocd"
-      hostname         = "argocd.ekstest.com"
+      namespace = "argocd"
+      hostnames = ["argocd.ekstest.com"]
       # Helm chart auto-creates argocd-server-tls (chart's primary).
       # The duplicate argocd-tls Cert (extraTls config) is benign and
       # left in place; not used by the Gateway listener.
       cert_secret_name = "argocd-server-tls"
-      listener_name    = "argocd-https"
+    }
+    hello = {
+      namespace        = "default"
+      hostnames        = ["hello.ekstest.com", "hello2.ekstest.com"]
+      cert_secret_name = "hello-tls-prod"
     }
   }
 
+  # Flatten the apps map into one (app, hostname) pair per listener.
+  # Each pair becomes a Gateway listener; multi-host apps (hello)
+  # produce multiple listeners that share a cert.
+  gateway_listener_specs = flatten([
+    for app_key, app in local.gateway_apps : [
+      for h in app.hostnames : {
+        app_key  = app_key
+        hostname = h
+        # Derive listener name from the hostname's first DNS label.
+        # "rag.ekstest.com"     → "rag-https"
+        # "hello2.ekstest.com"  → "hello2-https"
+        # Names are stable as long as hostnames are; existing HTTPRoutes
+        # keep matching by sectionName.
+        name      = "${split(".", h)[0]}-https"
+        namespace = app.namespace
+        cert      = app.cert_secret_name
+      }
+    ]
+  ])
+
   # Allowlist of namespaces that may attach HTTPRoutes via parentRef.
   # Computed from the same map so a new app entry is auto-allowed.
-  gateway_allowed_namespaces = [
+  gateway_allowed_namespaces = distinct([
     for app_key, app in local.gateway_apps : app.namespace
-  ]
+  ])
 }
 
 # =============================================================================
@@ -149,22 +177,25 @@ resource "kubectl_manifest" "shared_gateway" {
     }
     spec = {
       gatewayClassName = "istio"
-      # Build listeners list dynamically from the local.gateway_apps
-      # map. Each app gets one HTTPS listener with TLS termination
-      # via a cross-ns Secret reference (authorized by the per-app
-      # ReferenceGrant in the gateway-app module).
+      # Build listeners list dynamically from
+      # local.gateway_listener_specs. Each (app, hostname) pair
+      # produces one HTTPS listener with TLS termination via a
+      # cross-ns Secret reference (authorized by the per-app
+      # ReferenceGrant in the gateway-app module). Multi-host apps
+      # (hello) emit one listener per hostname, all sharing the same
+      # cert Secret (a SAN cert).
       listeners = [
-        for app_key, app in local.gateway_apps : {
-          name     = app.listener_name
-          hostname = app.hostname
+        for spec in local.gateway_listener_specs : {
+          name     = spec.name
+          hostname = spec.hostname
           port     = 443
           protocol = "HTTPS"
           tls = {
             mode = "Terminate"
             certificateRefs = [{
               kind      = "Secret"
-              name      = app.cert_secret_name
-              namespace = app.namespace
+              name      = spec.cert
+              namespace = spec.namespace
             }]
           }
           allowedRoutes = {
