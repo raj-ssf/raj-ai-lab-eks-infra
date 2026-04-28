@@ -234,3 +234,76 @@ output "gha_training_role_arn" {
   value       = aws_iam_role.gha_training.arn
   description = "Set as the TRAINING_AWS_ROLE_ARN repo variable in GitHub Actions"
 }
+
+# =============================================================================
+# Per-service IAM role for the eval image GHA push.
+#
+# Mirrors gha_training shape — separate role + policy + attachment scoped to
+# the eval ECR repo only. Build context: lm-evaluation-harness + langfuse
+# SDK + AWS tools. Used by F4 (eval comparing base vs fine-tuned vLLM).
+# =============================================================================
+
+resource "aws_iam_role" "gha_eval" {
+  name        = "${var.cluster_name}-gha-eval"
+  description = "Assumed by GHA build-push-eval workflow to push eval images to ECR"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Principal = {
+        Federated = data.aws_iam_openid_connect_provider.github.arn
+      }
+      Action = "sts:AssumeRoleWithWebIdentity"
+      Condition = {
+        StringEquals = {
+          "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
+        }
+        StringLike = {
+          "token.actions.githubusercontent.com:sub" = "repo:${var.gha_repo_owner}/${var.gha_repo_name}:ref:refs/heads/main"
+        }
+      }
+    }]
+  })
+}
+
+resource "aws_iam_policy" "gha_eval_ecr" {
+  name        = "${var.cluster_name}-gha-eval-ecr"
+  description = "ECR push permissions for eval repo"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid      = "AuthToken"
+        Effect   = "Allow"
+        Action   = "ecr:GetAuthorizationToken"
+        Resource = "*"
+      },
+      {
+        Sid    = "PushToEvalRepo"
+        Effect = "Allow"
+        Action = [
+          "ecr:BatchCheckLayerAvailability",
+          "ecr:BatchGetImage",
+          "ecr:CompleteLayerUpload",
+          "ecr:GetDownloadUrlForLayer",
+          "ecr:InitiateLayerUpload",
+          "ecr:PutImage",
+          "ecr:UploadLayerPart",
+        ]
+        Resource = aws_ecr_repository.eval.arn
+      },
+    ]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "gha_eval_ecr" {
+  role       = aws_iam_role.gha_eval.name
+  policy_arn = aws_iam_policy.gha_eval_ecr.arn
+}
+
+output "gha_eval_role_arn" {
+  value       = aws_iam_role.gha_eval.arn
+  description = "Set as the EVAL_AWS_ROLE_ARN repo variable in GitHub Actions"
+}

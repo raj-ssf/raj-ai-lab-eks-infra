@@ -42,6 +42,12 @@ locals {
     # because it's verified by the same supply-chain pattern.
     "${aws_ecr_repository.training.repository_url}*",
 
+    # Eval image (F4) — lm-evaluation-harness + langfuse SDK + AWS tools.
+    # Same GHA + cosign signing pattern. Pulled by eval Jobs in the
+    # `llm` namespace (eval Job lives there to colocate with the
+    # vllm-llama-8b Service it evaluates).
+    "${aws_ecr_repository.eval.repository_url}*",
+
     # Signed by argoproj/argo-cd releases (verify-argocd-image-signatures)
     "quay.io/argoproj/argocd*",
     "quay.io/argoproj/argocd-applicationset*",
