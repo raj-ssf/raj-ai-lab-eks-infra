@@ -179,6 +179,60 @@ resource "kubectl_manifest" "rag_cert_reference_grant" {
 # the existing allow-ingress-nginx + allow-langgraph-service policies.
 # When other apps migrate to HTTPRoute, each will need a parallel
 # allow-gateway policy in its own namespace.
+# AuthorizationPolicy: allow public/unauthenticated traffic INTO
+# the shared-gateway listener. Counterpart to the cluster-wide
+# deny-all in istio-system.
+#
+# The deny-all (raj-ai-lab-eks-infra/istio-zero-trust.tf:
+# kubectl_manifest.deny_all_mesh_wide) is a mesh-wide kill switch
+# with empty spec — nothing flows without explicit allow. The
+# gateway-system namespace IS meshed (the gateway pod IS Envoy,
+# reading istiod's xDS), so the deny-all applies. Without this
+# allow rule, every external request hits the gateway with 'RBAC:
+# access denied' 403.
+#
+# Pattern: 'rules: [{}]' is the empty-rule idiom from Istio docs —
+# matches any source, any method, any path. The selector scopes
+# the rule to the gateway pod via the canonical Gateway-API label
+# `gateway.networking.k8s.io/gateway-name=shared-gateway`. As more
+# Gateway resources are added (currently only one), each gets its
+# own allow rule via this same pattern with a different selector.
+#
+# Why this isn't a security hole:
+#   - Authentication still happens at the APPLICATION layer
+#     (Keycloak OIDC for chat-ui, JWT for langgraph-service, etc.)
+#   - The L7 mesh AuthZ continues to enforce gateway → backend
+#     identity (allow-gateway-system in each target namespace)
+#   - Listener TLS still requires a valid client TLS handshake
+#   - This rule only opens "external clients can reach the gateway
+#     pod itself" — what comes through is still subject to every
+#     downstream policy.
+resource "kubectl_manifest" "shared_gateway_allow_public" {
+  yaml_body = yamlencode({
+    apiVersion = "security.istio.io/v1"
+    kind       = "AuthorizationPolicy"
+    metadata = {
+      name      = "allow-public-ingress"
+      namespace = kubernetes_namespace.gateway_system.metadata[0].name
+    }
+    spec = {
+      selector = {
+        matchLabels = {
+          "gateway.networking.k8s.io/gateway-name" = "shared-gateway"
+        }
+      }
+      action = "ALLOW"
+      rules = [
+        {},
+      ]
+    }
+  })
+
+  depends_on = [
+    kubectl_manifest.shared_gateway,
+  ]
+}
+
 # Patch the Istio-created gateway Deployment to land its pod in
 # us-west-2a, the AZ where the NLB has a subnet.
 #
