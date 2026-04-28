@@ -112,6 +112,15 @@ locals {
       hostnames        = ["hello.ekstest.com", "hello2.ekstest.com"]
       cert_secret_name = "hello-tls-prod"
     }
+    keycloak = {
+      namespace = "keycloak"
+      hostnames = ["keycloak.ekstest.com"]
+      # Bitnami chart's tls=true auto-creates this Secret name
+      # ("<hostname>-tls"). The duplicate keycloak-tls Cert (extraTls
+      # config) is benign and left in place; not used by the Gateway
+      # listener.
+      cert_secret_name = "keycloak.ekstest.com-tls"
+    }
   }
 
   # Flatten the apps map into one (app, hostname) pair per listener.

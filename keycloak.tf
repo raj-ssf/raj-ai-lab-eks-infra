@@ -203,6 +203,13 @@ resource "helm_release" "keycloak" {
         annotations = {
           "cert-manager.io/cluster-issuer"                 = "letsencrypt-prod"
           "nginx.ingress.kubernetes.io/proxy-buffer-size"  = "16k"
+          # Phase 11 (final app) of Gateway API migration: opt out of
+          # ExternalDNS so this Helm-managed Ingress no longer competes
+          # with the keycloak HTTPRoute (kubectl_manifest below) for
+          # the keycloak.ekstest.com record. cert-manager renewal
+          # continues unaffected. See rag-service Ingress for the
+          # full rationale.
+          "external-dns.alpha.kubernetes.io/controller"    = "skip-migrated"
         }
         tls        = true
         selfSigned = false
@@ -235,4 +242,68 @@ resource "helm_release" "keycloak" {
 output "keycloak_admin_url_hint" {
   value       = "https://keycloak.${var.domain}/admin"
   description = "Keycloak admin console URL (login as admin with keycloak_admin_password)"
+}
+
+# =============================================================================
+# Phase 11 (FINAL) of Gateway API migration: HTTPRoute for keycloak.ekstest.com.
+#
+# This is the auth boundary — every other migrated app's OAuth/OIDC login
+# flow redirects through this hostname. Migration mechanics are identical
+# to the other Helm-managed apps (langfuse, grafana, vault, argocd):
+# Ingress + HTTPRoute coexist during cutover; ExternalDNS auto-migrates
+# the A record once the Ingress is annotated to opt-out.
+#
+# Critical behavior to verify post-cutover (browser test):
+#   1. Existing logged-in sessions to chat-ui / langfuse / etc. keep
+#      working (cookie-based, doesn't re-auth)
+#   2. Fresh login from any of those apps: redirect to
+#      keycloak.ekstest.com → user authenticates → callback returns
+#      to the originating app
+#   3. /admin console accessible
+#   4. JWT-bearing responses don't 502 (proxy-buffer-size 16k tuning
+#      was for NGINX; Envoy's 60KB default header buffer covers it)
+#
+# Backend: keycloak Service in keycloak ns, port 80 (named "http",
+# targetPort "http" — internally pod port 8080).
+#
+# Note on mesh: keycloak ns currently has no istio-injection label
+# (ArgoCD strips it; TF re-applies; race continues). The keycloak
+# pod has NO istio-proxy sidecar — the gateway → keycloak hop will
+# be plain HTTP (not mTLS), and the allow-gateway-system AuthZ in
+# keycloak ns will be a dormant rule (no enforcer). This is fine
+# for the migration; security posture is unchanged from the legacy
+# NGINX path which was also plain HTTP to the keycloak pod.
+# =============================================================================
+
+resource "kubectl_manifest" "keycloak_httproute" {
+  yaml_body = yamlencode({
+    apiVersion = "gateway.networking.k8s.io/v1"
+    kind       = "HTTPRoute"
+    metadata = {
+      name      = "keycloak"
+      namespace = "keycloak"
+      labels    = { app = "keycloak" }
+    }
+    spec = {
+      parentRefs = [{
+        name        = "shared-gateway"
+        namespace   = "gateway-system"
+        sectionName = "keycloak-https"
+      }]
+      hostnames = ["keycloak.${var.domain}"]
+      rules = [{
+        matches = [{
+          path = { type = "PathPrefix", value = "/" }
+        }]
+        backendRefs = [{
+          name = "keycloak"
+          port = 80
+        }]
+      }]
+    }
+  })
+
+  depends_on = [
+    helm_release.keycloak,
+  ]
 }
