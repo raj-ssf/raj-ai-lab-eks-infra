@@ -302,10 +302,10 @@ resource "kubectl_manifest" "langgraph_app" {
         targetRevision = "HEAD"
         path           = "langgraph-service/overlays/dev"
 
-        # Env-specific Ingress host injected here (same pattern as
-        # rag-service + vllm). The hostname in the source manifest is
-        # a placeholder that gets replaced per environment without
-        # forking the manifest.
+        # Env-specific Ingress + HTTPRoute hosts injected here (same
+        # pattern as rag-service + vllm). The hostname in the source
+        # manifest is a placeholder that gets replaced per environment
+        # without forking the manifest.
         kustomize = {
           patches = [
             {
@@ -319,6 +319,21 @@ resource "kubectl_manifest" "langgraph_app" {
                   value: langgraph.${var.domain}
                 - op: replace
                   path: /spec/rules/0/host
+                  value: langgraph.${var.domain}
+              EOT
+            },
+            # Phase 4 of Gateway API migration: same host-substitution
+            # for the new HTTPRoute. Coexists with the Ingress patch
+            # above; both serve langgraph.${var.domain}, reachable
+            # through different NLBs until DNS cutover.
+            {
+              target = {
+                kind = "HTTPRoute"
+                name = "langgraph-service"
+              }
+              patch = <<-EOT
+                - op: replace
+                  path: /spec/hostnames/0
                   value: langgraph.${var.domain}
               EOT
             },

@@ -108,6 +108,36 @@ resource "kubectl_manifest" "shared_gateway" {
             }
           }
         },
+        # Phase 4 of Gateway API migration: 2nd listener for
+        # langgraph.ekstest.com. Same shape as rag-https; cert-Secret
+        # in langgraph ns (langgraph-service-tls) referenced cross-ns
+        # via langgraph_cert_reference_grant below.
+        {
+          name     = "langgraph-https"
+          hostname = "langgraph.ekstest.com"
+          port     = 443
+          protocol = "HTTPS"
+          tls = {
+            mode = "Terminate"
+            certificateRefs = [
+              {
+                kind      = "Secret"
+                name      = "langgraph-service-tls"
+                namespace = "langgraph"
+              },
+            ]
+          }
+          allowedRoutes = {
+            namespaces = {
+              from = "Selector"
+              selector = {
+                matchLabels = {
+                  "gateway-access" = "enabled"
+                }
+              }
+            }
+          }
+        },
       ]
     }
   })
@@ -340,6 +370,87 @@ resource "kubernetes_labels" "rag_gateway_access" {
   kind        = "Namespace"
   metadata {
     name = "rag"
+  }
+  labels = {
+    "gateway-access" = "enabled"
+  }
+  force         = true
+  field_manager = "terraform-raj-ai-lab"
+
+  depends_on = [
+    kubectl_manifest.shared_gateway,
+  ]
+}
+
+# =============================================================================
+# Phase 4: langgraph-service per-app resources.
+#
+# Same triplet (cert ReferenceGrant + gateway-source AuthZ + ns label)
+# the rag-service migration introduced. Replicating per-app explicitly
+# rather than templating with for_each so each app's wiring is legible
+# and individually revertable. When N gets to 8-10, refactor to a
+# Terraform module taking (app_name, namespace, cert_secret_name).
+# =============================================================================
+
+resource "kubectl_manifest" "langgraph_cert_reference_grant" {
+  yaml_body = yamlencode({
+    apiVersion = "gateway.networking.k8s.io/v1beta1"
+    kind       = "ReferenceGrant"
+    metadata = {
+      name      = "allow-gateway-system-cert-read"
+      namespace = "langgraph"
+    }
+    spec = {
+      from = [{
+        group     = "gateway.networking.k8s.io"
+        kind      = "Gateway"
+        namespace = "gateway-system"
+      }]
+      to = [{
+        group = ""
+        kind  = "Secret"
+        name  = "langgraph-service-tls"
+      }]
+    }
+  })
+
+  depends_on = [
+    kubectl_manifest.gateway_api_crds,
+  ]
+}
+
+resource "kubectl_manifest" "langgraph_authz_allow_gateway" {
+  yaml_body = yamlencode({
+    apiVersion = "security.istio.io/v1"
+    kind       = "AuthorizationPolicy"
+    metadata = {
+      name      = "allow-gateway-system"
+      namespace = "langgraph"
+    }
+    spec = {
+      action = "ALLOW"
+      rules = [{
+        from = [{
+          source = {
+            principals = [
+              "cluster.local/ns/gateway-system/sa/shared-gateway-istio",
+            ]
+          }
+        }]
+      }]
+    }
+  })
+
+  depends_on = [
+    kubectl_manifest.shared_gateway,
+  ]
+}
+
+resource "kubernetes_labels" "langgraph_gateway_access" {
+  api_version = "v1"
+  kind        = "Namespace"
+  metadata {
+    name = "langgraph"
   }
   labels = {
     "gateway-access" = "enabled"
