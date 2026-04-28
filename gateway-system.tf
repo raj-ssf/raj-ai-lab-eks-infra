@@ -95,6 +95,15 @@ locals {
       cert_secret_name = "vault-tls"
       listener_name    = "vault-https"
     }
+    argocd = {
+      namespace        = "argocd"
+      hostname         = "argocd.ekstest.com"
+      # Helm chart auto-creates argocd-server-tls (chart's primary).
+      # The duplicate argocd-tls Cert (extraTls config) is benign and
+      # left in place; not used by the Gateway listener.
+      cert_secret_name = "argocd-server-tls"
+      listener_name    = "argocd-https"
+    }
   }
 
   # Allowlist of namespaces that may attach HTTPRoutes via parentRef.

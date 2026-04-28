@@ -56,6 +56,24 @@ resource "helm_release" "argocd" {
         # no longer merged into the chart-managed argocd-secret.
       }
 
+      # Disable the redis-secret-init Helm pre-upgrade Job. The chart
+      # creates this Job on every install/upgrade to populate the
+      # argocd-redis Secret; that Secret was created on initial
+      # install (2026-04-20) and persists unchanged. The Job's image
+      # is tag-only (quay.io/argoproj/argocd:v2.13.1) which the lab's
+      # verify-argocd-image-signatures Kyverno policy blocks at admission
+      # because cosign verification requires a digest. Skipping the Job
+      # avoids the Kyverno collision; the existing Secret keeps working.
+      #
+      # If we ever NEED to rotate the Redis password, options are:
+      #   1. Re-enable temporarily, accept the Kyverno block, manually
+      #      apply the Secret, then re-disable; OR
+      #   2. Add a Kyverno PolicyException for this specific Job; OR
+      #   3. Pin the Job image to digest format in helm values.
+      redisSecretInit = {
+        enabled = false
+      }
+
       server = {
         service = { type = "ClusterIP" }
 
@@ -70,6 +88,12 @@ resource "helm_release" "argocd" {
             # proxy timeouts so long-lived streams don't get cut off.
             "nginx.ingress.kubernetes.io/proxy-read-timeout"   = "1800"
             "nginx.ingress.kubernetes.io/proxy-send-timeout"   = "1800"
+            # Phase 9 of Gateway API migration: opt out of ExternalDNS
+            # so this Helm-managed Ingress no longer competes with the
+            # argocd HTTPRoute for the argocd.ekstest.com record.
+            # cert-manager renewal continues unaffected. See rag-service
+            # Ingress for full rationale.
+            "external-dns.alpha.kubernetes.io/controller"      = "skip-migrated"
           }
           tls = true
           extraTls = [{
@@ -85,5 +109,58 @@ resource "helm_release" "argocd" {
     module.eks,
     helm_release.alb_controller,
     helm_release.cert_manager,
+  ]
+}
+
+# =============================================================================
+# Phase 9 of Gateway API migration: HTTPRoute for argocd.ekstest.com.
+#
+# argocd-server serves both REST (HTTP) + gRPC (SPDY/HTTP-2) + WebSockets
+# on /api/v1/stream/... (live application status streams). All speak HTTP/1.1
+# or HTTP/2 over TLS — Envoy routes them all transparently from a single
+# HTTPRoute, no per-protocol config needed.
+#
+# The legacy Ingress had:
+#   - backend-protocol: HTTP        — Envoy doesn't need (default)
+#   - proxy-read/send-timeout: 1800 — Envoy default 1h covers WS streams
+#   - upstream-vhost rewrite        — Envoy doesn't need (mesh-native)
+# All three NGINX-isms drop away.
+#
+# argocd-server has TWO Service ports: http(80) + https(443), both
+# targetPort 8080. The HTTPRoute uses port 80 (matches the Ingress'
+# choice; Envoy speaks plain HTTP to the backend, terminates TLS at
+# the listener).
+# =============================================================================
+
+resource "kubectl_manifest" "argocd_httproute" {
+  yaml_body = yamlencode({
+    apiVersion = "gateway.networking.k8s.io/v1"
+    kind       = "HTTPRoute"
+    metadata = {
+      name      = "argocd-server"
+      namespace = "argocd"
+      labels    = { app = "argocd-server" }
+    }
+    spec = {
+      parentRefs = [{
+        name        = "shared-gateway"
+        namespace   = "gateway-system"
+        sectionName = "argocd-https"
+      }]
+      hostnames = ["argocd.${var.domain}"]
+      rules = [{
+        matches = [{
+          path = { type = "PathPrefix", value = "/" }
+        }]
+        backendRefs = [{
+          name = "argocd-server"
+          port = 80
+        }]
+      }]
+    }
+  })
+
+  depends_on = [
+    helm_release.argocd,
   ]
 }
