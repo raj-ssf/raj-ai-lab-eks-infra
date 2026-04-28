@@ -1,6 +1,16 @@
 resource "kubernetes_namespace" "keycloak" {
   metadata {
     name = "keycloak"
+    labels = {
+      # Mesh-injection label declared HERE so the kubernetes_namespace
+      # resource doesn't strip it on every TF run. (Previously
+      # kubernetes_labels.istio_injection["keycloak"] in istio.tf was
+      # adding it; kubernetes_namespace was removing it. The cycle
+      # caused keycloak pods to occasionally be admitted without an
+      # istio-proxy sidecar, which broke the gateway → keycloak path
+      # via force-mtls-keycloak DR — see Phase 12a debug log.)
+      "istio-injection" = "enabled"
+    }
   }
 }
 
@@ -129,12 +139,28 @@ resource "helm_release" "keycloak" {
       # KC_HOSTNAME_STRICT=false lets us hit the pod via ClusterIP/port-forward
       # for debugging without tripping Keycloak's hostname check.
       #
+      # KC_HOSTNAME as a FULL URL (with https:// scheme) is required so that
+      # Keycloak emits https URLs in OIDC discovery responses regardless of
+      # the request's protocol. WITHOUT this fix, cluster-internal requests
+      # arriving over plain HTTP (server-side token exchange via
+      # http://keycloak.keycloak.svc.cluster.local) caused Keycloak to
+      # respond with http:// URLs in /.well-known/openid-configuration AND
+      # in the issuer claim of JWTs — which broke OIDC consumers (argocd,
+      # grafana, langfuse, chat-ui) because they expected the issuer to
+      # match their configured https://keycloak.ekstest.com/realms/...
+      # canonical URL. Symptom: login flow completed at the browser but
+      # the consumer rejected the token with iss-mismatch errors. Diagnosed
+      # 2026-04-28 after Phase 12b decommissioned ingress-nginx (NGINX had
+      # been masking this by terminating TLS for cluster-internal callers
+      # too via its X-Forwarded-Proto headers — Istio Gateway doesn't sit
+      # in the cluster-internal path, so the asymmetry surfaced).
+      #
       # KC_DB_PASSWORD uses Keycloak's `file:` config-source prefix, which
       # reads the value at startup from the injected Vault Agent sidecar
       # file. Applies to any KC_* option; this is Keycloak's equivalent of
       # Grafana's GF_*__FILE convention.
       extraEnvVars = [
-        { name = "KC_HOSTNAME",       value = "keycloak.${var.domain}" },
+        { name = "KC_HOSTNAME",       value = "https://keycloak.${var.domain}" },
         { name = "KC_HOSTNAME_STRICT", value = "false" },
         { name = "KC_HTTP_ENABLED",   value = "true" },
         { name = "KC_HEALTH_ENABLED", value = "true" },
@@ -196,20 +222,10 @@ resource "helm_release" "keycloak" {
       # Ingress → NGINX → cert-manager issues LE prod cert.
       # proxy-buffer-size bump: JWT-carrying auth responses overflow the 4k
       # default and return 502 otherwise.
+      # Phase 12 of Gateway API migration: chart's Ingress disabled.
+      # Traffic now flows through shared-gateway in gateway-system ns.
       ingress = {
-        enabled          = true
-        ingressClassName = "nginx"
-        hostname         = "keycloak.${var.domain}"
-        annotations = {
-          "cert-manager.io/cluster-issuer"                 = "letsencrypt-prod"
-          "nginx.ingress.kubernetes.io/proxy-buffer-size"  = "16k"
-        }
-        tls        = true
-        selfSigned = false
-        extraTls = [{
-          hosts      = ["keycloak.${var.domain}"]
-          secretName = "keycloak-tls"
-        }]
+        enabled = false
       }
     })
   ]
@@ -235,4 +251,68 @@ resource "helm_release" "keycloak" {
 output "keycloak_admin_url_hint" {
   value       = "https://keycloak.${var.domain}/admin"
   description = "Keycloak admin console URL (login as admin with keycloak_admin_password)"
+}
+
+# =============================================================================
+# Phase 11 (FINAL) of Gateway API migration: HTTPRoute for keycloak.ekstest.com.
+#
+# This is the auth boundary — every other migrated app's OAuth/OIDC login
+# flow redirects through this hostname. Migration mechanics are identical
+# to the other Helm-managed apps (langfuse, grafana, vault, argocd):
+# Ingress + HTTPRoute coexist during cutover; ExternalDNS auto-migrates
+# the A record once the Ingress is annotated to opt-out.
+#
+# Critical behavior to verify post-cutover (browser test):
+#   1. Existing logged-in sessions to chat-ui / langfuse / etc. keep
+#      working (cookie-based, doesn't re-auth)
+#   2. Fresh login from any of those apps: redirect to
+#      keycloak.ekstest.com → user authenticates → callback returns
+#      to the originating app
+#   3. /admin console accessible
+#   4. JWT-bearing responses don't 502 (proxy-buffer-size 16k tuning
+#      was for NGINX; Envoy's 60KB default header buffer covers it)
+#
+# Backend: keycloak Service in keycloak ns, port 80 (named "http",
+# targetPort "http" — internally pod port 8080).
+#
+# Note on mesh: keycloak ns currently has no istio-injection label
+# (ArgoCD strips it; TF re-applies; race continues). The keycloak
+# pod has NO istio-proxy sidecar — the gateway → keycloak hop will
+# be plain HTTP (not mTLS), and the allow-gateway-system AuthZ in
+# keycloak ns will be a dormant rule (no enforcer). This is fine
+# for the migration; security posture is unchanged from the legacy
+# NGINX path which was also plain HTTP to the keycloak pod.
+# =============================================================================
+
+resource "kubectl_manifest" "keycloak_httproute" {
+  yaml_body = yamlencode({
+    apiVersion = "gateway.networking.k8s.io/v1"
+    kind       = "HTTPRoute"
+    metadata = {
+      name      = "keycloak"
+      namespace = "keycloak"
+      labels    = { app = "keycloak" }
+    }
+    spec = {
+      parentRefs = [{
+        name        = "shared-gateway"
+        namespace   = "gateway-system"
+        sectionName = "keycloak-https"
+      }]
+      hostnames = ["keycloak.${var.domain}"]
+      rules = [{
+        matches = [{
+          path = { type = "PathPrefix", value = "/" }
+        }]
+        backendRefs = [{
+          name = "keycloak"
+          port = 80
+        }]
+      }]
+    }
+  })
+
+  depends_on = [
+    helm_release.keycloak,
+  ]
 }

@@ -92,21 +92,10 @@ resource "helm_release" "vault" {
           limits   = { cpu = "500m", memory = "512Mi" }
         }
 
-        # Ingress → NGINX → cert-manager (LE prod).
+        # Phase 12 of Gateway API migration: chart's Ingress disabled.
+        # Traffic now flows through shared-gateway in gateway-system ns.
         ingress = {
-          enabled          = true
-          ingressClassName = "nginx"
-          hosts = [{
-            host  = "vault.${var.domain}"
-            paths = []
-          }]
-          annotations = {
-            "cert-manager.io/cluster-issuer" = "letsencrypt-prod"
-          }
-          tls = [{
-            hosts      = ["vault.${var.domain}"]
-            secretName = "vault-tls"
-          }]
+          enabled = false
         }
 
         # Readiness needs Vault unsealed; during first boot (before init) the
@@ -153,4 +142,51 @@ resource "helm_release" "vault" {
 output "vault_url_hint" {
   value       = "https://vault.${var.domain} (init: kubectl -n vault exec -it vault-0 -- vault operator init -recovery-shares=5 -recovery-threshold=3)"
   description = "Vault external URL + bootstrap command"
+}
+
+# =============================================================================
+# Phase 8 of Gateway API migration: HTTPRoute for vault.ekstest.com.
+# Sibling to the helm_release; see langfuse.tf for the pattern's rationale.
+#
+# Routes to vault-active (the active leader of the Raft HA cluster). On
+# leader-election change, vault-active's selector flips to the new leader
+# automatically — no HTTPRoute reconfig needed. The plain port (8200) is
+# the public-facing one; raft port 8201 has its own internal TLS and isn't
+# exposed externally.
+# =============================================================================
+
+resource "kubectl_manifest" "vault_httproute" {
+  yaml_body = yamlencode({
+    apiVersion = "gateway.networking.k8s.io/v1"
+    kind       = "HTTPRoute"
+    metadata = {
+      name      = "vault"
+      namespace = "vault"
+      labels    = { app = "vault" }
+    }
+    spec = {
+      parentRefs = [{
+        name        = "shared-gateway"
+        namespace   = "gateway-system"
+        sectionName = "vault-https"
+      }]
+      hostnames = ["vault.${var.domain}"]
+      rules = [{
+        matches = [{
+          path = { type = "PathPrefix", value = "/" }
+        }]
+        backendRefs = [{
+          # vault-active Service exposes port 8200 (named "http") for
+          # the public API. The 8201 https-internal port is for Raft
+          # only and isn't routed externally.
+          name = "vault-active"
+          port = 8200
+        }]
+      }]
+    }
+  })
+
+  depends_on = [
+    helm_release.vault,
+  ]
 }

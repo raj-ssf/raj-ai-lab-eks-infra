@@ -207,3 +207,66 @@ resource "kubectl_manifest" "allow_langgraph_to_llm" {
     kubernetes_namespace.langgraph,
   ]
 }
+
+# =============================================================================
+# Kubernetes RBAC: langgraph-service SA can read + patch Deployment scale in llm.
+#
+# ensure_warm() in main.py calls apps_v1.patch_namespaced_deployment_scale
+# to bring a target Deployment from replicas=0 to 1 when the classifier
+# routes a request that needs the heavier model. Without this Role, the
+# call hits Forbidden at the kube-apiserver and surfaces in chat-ui as:
+#   ❌ upstream returned 502: failed to read scale of llm/<deploy>: Forbidden
+#
+# The trivial-routed path doesn't need this — when the 8B is already at
+# replicas=1, ensure_warm short-circuits without an API call. So this
+# RBAC gap was latent until the classifier first picked 'reasoning' or
+# 'hard' (which it finally did for code-generation prompts).
+#
+# Scope: ns-wide on apps/deployments + apps/deployments/scale, plus pod
+# get/list/watch so ensure_warm can poll for "ready replica" status
+# after issuing the scale patch. Bound to the langgraph-service SA only.
+# =============================================================================
+
+resource "kubernetes_role_v1" "langgraph_scale_llm" {
+  metadata {
+    name      = "langgraph-deployment-scaler"
+    namespace = "llm"
+  }
+
+  rule {
+    api_groups = ["apps"]
+    resources  = ["deployments"]
+    verbs      = ["get", "list", "watch"]
+  }
+
+  rule {
+    api_groups = ["apps"]
+    resources  = ["deployments/scale"]
+    verbs      = ["get", "patch", "update"]
+  }
+
+  rule {
+    api_groups = [""]
+    resources  = ["pods"]
+    verbs      = ["get", "list", "watch"]
+  }
+}
+
+resource "kubernetes_role_binding_v1" "langgraph_scale_llm" {
+  metadata {
+    name      = "langgraph-deployment-scaler"
+    namespace = "llm"
+  }
+
+  role_ref {
+    api_group = "rbac.authorization.k8s.io"
+    kind      = "Role"
+    name      = kubernetes_role_v1.langgraph_scale_llm.metadata[0].name
+  }
+
+  subject {
+    kind      = "ServiceAccount"
+    name      = "langgraph-service"
+    namespace = "langgraph"
+  }
+}

@@ -57,22 +57,22 @@ resource "kubectl_manifest" "rag_service_app" {
         targetRevision = "HEAD"
         path           = "rag-service/overlays/dev"
 
-        # Env-specific Ingress host injected here (NOT in the public app repo).
-        # SA role binding is handled by aws_eks_pod_identity_association.rag_service
-        # in bedrock-irsa.tf — no annotation needed on the SA.
+        # Env-specific Ingress + HTTPRoute hosts injected here (NOT in
+        # the public app repo). SA role binding is handled by
+        # aws_eks_pod_identity_association.rag_service in
+        # bedrock-irsa.tf — no annotation needed on the SA.
+        # Post-Phase 12: legacy Ingress removed; only the HTTPRoute
+        # hostname patch remains.
         kustomize = {
           patches = [
             {
               target = {
-                kind = "Ingress"
+                kind = "HTTPRoute"
                 name = "rag-service"
               }
               patch = <<-EOT
                 - op: replace
-                  path: /spec/tls/0/hosts/0
-                  value: rag.${var.domain}
-                - op: replace
-                  path: /spec/rules/0/host
+                  path: /spec/hostnames/0
                   value: rag.${var.domain}
               EOT
             },
@@ -120,22 +120,22 @@ resource "kubectl_manifest" "vllm_app" {
         targetRevision = "HEAD"
         path           = "llm/overlays/dev"
 
-        # Env-specific Ingress host injected here (same pattern as rag-service).
-        # Pod Identity binding for the vllm SA lives in model-weights.tf — no
-        # annotation patch on the SA needed.
+        # Env-specific Ingress + HTTPRoute hosts injected here (same
+        # pattern as rag-service). Pod Identity binding for the vllm
+        # SA lives in model-weights.tf — no annotation patch on the
+        # SA needed.
+        # Post-Phase 12: legacy Ingress removed; only the HTTPRoute
+        # hostname patch remains.
         kustomize = {
           patches = [
             {
               target = {
-                kind = "Ingress"
+                kind = "HTTPRoute"
                 name = "vllm"
               }
               patch = <<-EOT
                 - op: replace
-                  path: /spec/tls/0/hosts/0
-                  value: llm.${var.domain}
-                - op: replace
-                  path: /spec/rules/0/host
+                  path: /spec/hostnames/0
                   value: llm.${var.domain}
               EOT
             },
@@ -240,6 +240,13 @@ resource "kubectl_manifest" "vllm_app" {
           namespace    = "llm"
           jsonPointers = ["/spec/replicas"]
         },
+        {
+          group        = "apps"
+          kind         = "Deployment"
+          name         = "vllm-bge-m3"
+          namespace    = "llm"
+          jsonPointers = ["/spec/replicas"]
+        },
       ]
       syncPolicy = {
         automated = {
@@ -279,23 +286,22 @@ resource "kubectl_manifest" "langgraph_app" {
         targetRevision = "HEAD"
         path           = "langgraph-service/overlays/dev"
 
-        # Env-specific Ingress host injected here (same pattern as
-        # rag-service + vllm). The hostname in the source manifest is
-        # a placeholder that gets replaced per environment without
-        # forking the manifest.
+        # Env-specific Ingress + HTTPRoute hosts injected here (same
+        # pattern as rag-service + vllm). The hostname in the source
+        # manifest is a placeholder that gets replaced per environment
+        # without forking the manifest.
         kustomize = {
           patches = [
+            # Post-Phase 12: legacy Ingress removed; only the HTTPRoute
+            # hostname patch remains.
             {
               target = {
-                kind = "Ingress"
+                kind = "HTTPRoute"
                 name = "langgraph-service"
               }
               patch = <<-EOT
                 - op: replace
-                  path: /spec/tls/0/hosts/0
-                  value: langgraph.${var.domain}
-                - op: replace
-                  path: /spec/rules/0/host
+                  path: /spec/hostnames/0
                   value: langgraph.${var.domain}
               EOT
             },
@@ -345,23 +351,22 @@ resource "kubectl_manifest" "chat_ui_app" {
         targetRevision = "HEAD"
         path           = "chat-ui/overlays/dev"
 
-        # Env-specific Ingress host injected here (same pattern as
-        # langgraph-service / rag-service / vllm). The hostname in the
-        # source manifest is a placeholder that gets replaced per
-        # environment without forking the manifest.
+        # Env-specific Ingress + HTTPRoute hosts injected here (same
+        # pattern as langgraph-service / rag-service / vllm). The
+        # hostname in the source manifest is a placeholder that gets
+        # replaced per environment without forking the manifest.
+        # Post-Phase 12: legacy Ingress removed; only the HTTPRoute
+        # hostname patch remains.
         kustomize = {
           patches = [
             {
               target = {
-                kind = "Ingress"
+                kind = "HTTPRoute"
                 name = "chat-ui"
               }
               patch = <<-EOT
                 - op: replace
-                  path: /spec/tls/0/hosts/0
-                  value: chat.${var.domain}
-                - op: replace
-                  path: /spec/rules/0/host
+                  path: /spec/hostnames/0
                   value: chat.${var.domain}
               EOT
             },
@@ -435,5 +440,50 @@ resource "kubectl_manifest" "qdrant_app" {
   depends_on = [
     helm_release.argocd,
     kubernetes_secret.argocd_app_repo,
+  ]
+}
+
+resource "kubectl_manifest" "ingestion_service_app" {
+  yaml_body = yamlencode({
+    apiVersion = "argoproj.io/v1alpha1"
+    kind       = "Application"
+    metadata = {
+      name      = "ingestion-service"
+      namespace = kubernetes_namespace.argocd.metadata[0].name
+      finalizers = [
+        "resources-finalizer.argocd.argoproj.io",
+      ]
+    }
+    spec = {
+      project = "default"
+      source = {
+        repoURL        = var.argocd_app_repo_url
+        targetRevision = "HEAD"
+        path           = "ingestion-service/overlays/dev"
+        # No Ingress to patch — ingestion-service is in-cluster only;
+        # chat-ui calls it via the K8s Service URL.
+      }
+      destination = {
+        server    = "https://kubernetes.default.svc"
+        namespace = "ingestion"
+      }
+      syncPolicy = {
+        automated = {
+          prune    = true
+          selfHeal = true
+        }
+        syncOptions = [
+          "CreateNamespace=true",
+          "PrunePropagationPolicy=foreground",
+          "RespectIgnoreDifferences=true",
+        ]
+      }
+    }
+  })
+
+  depends_on = [
+    helm_release.argocd,
+    kubernetes_secret.argocd_app_repo,
+    kubernetes_namespace.ingestion,
   ]
 }

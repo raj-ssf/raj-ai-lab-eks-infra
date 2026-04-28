@@ -97,7 +97,16 @@ locals {
   # the langfuse namespace is later mesh-injected.
   force_mtls_targets = {
     argocd-server = { namespace = "argocd",   service = "argocd-server" }
-    keycloak      = { namespace = "keycloak", service = "keycloak" }
+    # keycloak removed 2026-04-28 — same rationale as langfuse-web's
+    # earlier removal: keycloak's pod has no istio-proxy sidecar (the
+    # istio-injection label on keycloak ns is unstable due to ArgoCD
+    # stripping it; new pods rolled by helm upgrades land without a
+    # sidecar). force-mtls on an unmeshed destination causes
+    # TLS_error: WRONG_VERSION_NUMBER → 503 from the gateway. After
+    # Phase 12b removes ingress-nginx, ALL the remaining force-mtls
+    # entries here become obsolete (they were workarounds for NGINX's
+    # auto-mTLS detection asymmetry, not needed for the meshed
+    # gateway-system Envoy). Cleanup deferred to a follow-up.
     rag-service   = { namespace = "rag",      service = "rag-service" }
     chat-ui       = { namespace = "chat",     service = "chat-ui" }
   }
@@ -128,68 +137,15 @@ resource "kubectl_manifest" "force_mtls" {
 
   depends_on = [
     helm_release.istiod,
-    helm_release.ingress_nginx,
   ]
 }
 
-# =============================================================================
-# DestinationRule: DISABLE TLS for outbound to ingress-nginx Service.
-#
-# Why: CoreDNS has a rewrite (kube-system/coredns ConfigMap) mapping
-# `keycloak.ekstest.com` → `ingress-nginx-controller.ingress-nginx.svc.
-# cluster.local` to short-circuit the NLB hairpin for in-cluster OIDC
-# discovery. argocd-server (and langfuse-web) make HTTPS requests to
-# `https://keycloak.ekstest.com/...` which now resolve to the
-# ingress-nginx Service ClusterIP, hit NGINX directly, and get NGINX's
-# Let's Encrypt cert. NGINX is L7-terminating real TLS itself.
-#
-# When the source pod is meshed, source-side Envoy intercepts that
-# outbound connection. By default, Istio's auto-mTLS / SNI-based
-# routing kicks in for the destination Service (which IS in the mesh
-# from Istio's view since ingress-nginx is in mesh) — and that
-# interferes with the standard TLS handshake NGINX expects from a
-# regular HTTPS client. Symptom: source-side `connection reset by
-# peer` on the TLS handshake; destination-side NGINX log shows a
-# brief connect-then-disconnect.
-#
-# Fix: tls.mode=DISABLE here tells source Envoys "don't initiate any
-# TLS (mutual or otherwise) to this destination — pass the bytes
-# through transparently." The original HTTPS connection from the
-# client (argocd-server / langfuse-web) reaches NGINX intact, NGINX
-# terminates with its cert-manager-issued cert, and the OIDC
-# discovery succeeds.
-#
-# Note: this does NOT compromise mTLS for backend traffic. NGINX's
-# OUTBOUND traffic (NGINX → keycloak/argocd-server/etc.) still
-# initiates ISTIO_MUTUAL via the per-Service force-mtls
-# DestinationRules above. Only the leg from in-cluster source pods
-# directly to the ingress-nginx Service is affected — and that leg
-# is just standard HTTPS, no need for mesh mTLS on top.
-# =============================================================================
-
-resource "kubectl_manifest" "ingress_nginx_no_mtls" {
-  yaml_body = yamlencode({
-    apiVersion = "networking.istio.io/v1"
-    kind       = "DestinationRule"
-    metadata = {
-      name      = "ingress-nginx-no-mtls"
-      namespace = "ingress-nginx"
-    }
-    spec = {
-      host = "ingress-nginx-controller.ingress-nginx.svc.cluster.local"
-      trafficPolicy = {
-        tls = {
-          mode = "DISABLE"
-        }
-      }
-    }
-  })
-
-  depends_on = [
-    helm_release.istiod,
-    helm_release.ingress_nginx,
-  ]
-}
+# (Removed 2026-04-28, Phase 12b cleanup: kubectl_manifest.ingress_nginx_no_mtls
+#  DestinationRule. It disabled mTLS for in-cluster source pods → ingress-nginx
+#  Service traffic, working around an Istio auto-mTLS conflict with the
+#  CoreDNS rewrite that mapped keycloak.ekstest.com → ingress-nginx ClusterIP.
+#  Now that ingress-nginx is uninstalled, the CoreDNS rewrite is gone too,
+#  and there's no in-cluster path to ingress-nginx to mTLS-disable.)
 
 # =============================================================================
 # Cluster-wide deny-all in the mesh root namespace.
@@ -234,7 +190,6 @@ resource "kubectl_manifest" "deny_all_mesh_wide" {
   # rules below wouldn't match — briefly breaking north-south traffic.
   depends_on = [
     helm_release.istiod,
-    helm_release.ingress_nginx,
     kubectl_manifest.force_mtls,
   ]
 }
@@ -300,7 +255,6 @@ resource "kubectl_manifest" "allow_ingress_nginx" {
   depends_on = [
     helm_release.istiod,
     kubectl_manifest.deny_all_mesh_wide,
-    helm_release.ingress_nginx,
   ]
 }
 
@@ -357,7 +311,6 @@ resource "kubectl_manifest" "allow_intra_namespace" {
   depends_on = [
     helm_release.istiod,
     kubectl_manifest.deny_all_mesh_wide,
-    helm_release.ingress_nginx,
   ]
 }
 
@@ -430,6 +383,95 @@ resource "kubectl_manifest" "allow_langgraph_to_langfuse" {
               principals = [
                 "cluster.local/ns/langgraph/sa/langgraph-service",
               ]
+            }
+          }]
+        },
+      ]
+    }
+  })
+
+  depends_on = [
+    helm_release.istiod,
+    kubectl_manifest.deny_all_mesh_wide,
+  ]
+}
+
+# Phase 4: rag-service's new /retrieve endpoint embeds queries via
+# vllm-bge-m3 in the llm namespace. The mesh-wide deny-all blocks
+# rag's SA from reaching llm's pods; this allow rule unblocks it.
+#
+# Sits alongside the existing allow-ingestion-service policy in the
+# llm ns (see ingestion-service.tf). Istio combines multiple ALLOW
+# rules with OR semantics — naming this policy distinctly
+# (allow-rag-service vs. allow-ingestion-service) keeps the two
+# producers' permissions independent and easy to revoke individually.
+#
+# This is the symmetric counterpart of allow-rag-service-only on the
+# qdrant side: rag-service was always allowed into qdrant; today's
+# add gives it the embedder it needs to BUILD the query vector first.
+resource "kubectl_manifest" "allow_rag_to_llm" {
+  yaml_body = yamlencode({
+    apiVersion = "security.istio.io/v1"
+    kind       = "AuthorizationPolicy"
+    metadata = {
+      name      = "allow-rag-service"
+      namespace = "llm"
+    }
+    spec = {
+      action = "ALLOW"
+      rules = [
+        {
+          from = [{
+            source = {
+              principals = [
+                "cluster.local/ns/rag/sa/rag-service",
+              ]
+            }
+          }]
+        },
+      ]
+    }
+  })
+
+  depends_on = [
+    helm_release.istiod,
+    kubectl_manifest.deny_all_mesh_wide,
+  ]
+}
+
+# Phase 4: langgraph-service's retrieve node calls rag-service /retrieve
+# for per-session RAG. The mesh-wide deny-all blocks this east-west hop
+# by default; this policy allows the langgraph SA into the rag namespace.
+# Scoped to the rag-service workload via app=rag-service selector so the
+# rule survives if other (less-trusted) workloads ever land in rag ns.
+resource "kubectl_manifest" "allow_langgraph_to_rag" {
+  yaml_body = yamlencode({
+    apiVersion = "security.istio.io/v1"
+    kind       = "AuthorizationPolicy"
+    metadata = {
+      name      = "allow-langgraph-service"
+      namespace = "rag"
+    }
+    spec = {
+      selector = {
+        matchLabels = {
+          app = "rag-service"
+        }
+      }
+      action = "ALLOW"
+      rules = [
+        {
+          from = [{
+            source = {
+              principals = [
+                "cluster.local/ns/langgraph/sa/langgraph-service",
+              ]
+            }
+          }]
+          to = [{
+            operation = {
+              methods = ["POST"]
+              paths   = ["/retrieve"]
             }
           }]
         },
