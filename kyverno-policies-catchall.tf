@@ -36,6 +36,12 @@ locals {
     # Signed by our own GHA workflow (verify-rag-service-image-signature)
     "${aws_ecr_repository.rag_service.repository_url}*",
 
+    # Training image — same GHA + cosign signing pipeline as the other
+    # service repos. Built in fine-tuning F2; until then no Pods reference
+    # this image so the entry is harmless. Listed alongside rag-service
+    # because it's verified by the same supply-chain pattern.
+    "${aws_ecr_repository.training.repository_url}*",
+
     # Signed by argoproj/argo-cd releases (verify-argocd-image-signatures)
     "quay.io/argoproj/argocd*",
     "quay.io/argoproj/argocd-applicationset*",
@@ -85,6 +91,16 @@ locals {
     "langfuse/langfuse*",
     "docker.io/langfuse/langfuse-worker*",
     "langfuse/langfuse-worker*",
+
+    # Kubeflow Training Operator (kubeflow namespace). The chart's
+    # controller-manager pulls from kubeflow/training-operator on Docker
+    # Hub. Project doesn't publish cosign signatures on Docker Hub tags
+    # as of writing; trust here is registry-level (Kubeflow community
+    # account control + chart version pin). Both registry-qualified
+    # forms listed for the same reason as vllm/langfuse — kustomize +
+    # helm chart values may emit either form.
+    "docker.io/kubeflow/training-operator*",
+    "kubeflow/training-operator*",
   ]
 }
 
@@ -117,7 +133,7 @@ resource "kubectl_manifest" "kyverno_deny_unverified_images" {
               {
                 resources = {
                   kinds      = ["Pod"]
-                  namespaces = ["rag", "qdrant", "keycloak", "argocd", "llm", "langfuse"]
+                  namespaces = ["rag", "qdrant", "keycloak", "argocd", "llm", "langfuse", "training", "kubeflow"]
                   # CREATE only — same rationale as verify-rag-service-image-signature:
                   # UPDATE operations on existing Deployments for unrelated fields
                   # (e.g. replica count patches) shouldn't be blocked by container-spec
