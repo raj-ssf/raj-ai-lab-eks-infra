@@ -57,9 +57,10 @@ resource "kubectl_manifest" "rag_service_app" {
         targetRevision = "HEAD"
         path           = "rag-service/overlays/dev"
 
-        # Env-specific Ingress host injected here (NOT in the public app repo).
-        # SA role binding is handled by aws_eks_pod_identity_association.rag_service
-        # in bedrock-irsa.tf — no annotation needed on the SA.
+        # Env-specific Ingress + HTTPRoute hosts injected here (NOT in
+        # the public app repo). SA role binding is handled by
+        # aws_eks_pod_identity_association.rag_service in
+        # bedrock-irsa.tf — no annotation needed on the SA.
         kustomize = {
           patches = [
             {
@@ -73,6 +74,21 @@ resource "kubectl_manifest" "rag_service_app" {
                   value: rag.${var.domain}
                 - op: replace
                   path: /spec/rules/0/host
+                  value: rag.${var.domain}
+              EOT
+            },
+            # Phase 2 of Gateway API migration: same host-substitution
+            # pattern for the new HTTPRoute. Coexists with the Ingress
+            # patch above; both resources serve rag.${var.domain},
+            # reachable through different NLBs until DNS cutover.
+            {
+              target = {
+                kind = "HTTPRoute"
+                name = "rag-service"
+              }
+              patch = <<-EOT
+                - op: replace
+                  path: /spec/hostnames/0
                   value: rag.${var.domain}
               EOT
             },
