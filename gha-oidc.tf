@@ -157,3 +157,80 @@ output "gha_langgraph_service_role_arn" {
   value       = aws_iam_role.gha_langgraph_service.arn
   description = "Set as the LANGGRAPH_AWS_ROLE_ARN repo variable in GitHub Actions"
 }
+
+# =============================================================================
+# Per-service IAM role for the training image GHA push.
+#
+# Mirrors gha_rag_service / gha_langgraph_service shape. Scoped to the
+# training ECR repo only (see training.tf for the repo). Pushed image is
+# the Axolotl-based training container used by PyTorchJob in fine-tuning F2.
+#
+# Same trust policy pattern: only this app repo on main branch, audience
+# pinned to sts.amazonaws.com. No image-signing key needed — keyless cosign
+# via Sigstore Fulcio uses the GHA OIDC token directly (see workflow).
+# =============================================================================
+
+resource "aws_iam_role" "gha_training" {
+  name        = "${var.cluster_name}-gha-training"
+  description = "Assumed by GHA build-push-training workflow to push training images to ECR"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Principal = {
+        Federated = data.aws_iam_openid_connect_provider.github.arn
+      }
+      Action = "sts:AssumeRoleWithWebIdentity"
+      Condition = {
+        StringEquals = {
+          "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
+        }
+        StringLike = {
+          "token.actions.githubusercontent.com:sub" = "repo:${var.gha_repo_owner}/${var.gha_repo_name}:ref:refs/heads/main"
+        }
+      }
+    }]
+  })
+}
+
+resource "aws_iam_policy" "gha_training_ecr" {
+  name        = "${var.cluster_name}-gha-training-ecr"
+  description = "ECR push permissions for training repo"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid      = "AuthToken"
+        Effect   = "Allow"
+        Action   = "ecr:GetAuthorizationToken"
+        Resource = "*"
+      },
+      {
+        Sid    = "PushToTrainingRepo"
+        Effect = "Allow"
+        Action = [
+          "ecr:BatchCheckLayerAvailability",
+          "ecr:BatchGetImage",
+          "ecr:CompleteLayerUpload",
+          "ecr:GetDownloadUrlForLayer",
+          "ecr:InitiateLayerUpload",
+          "ecr:PutImage",
+          "ecr:UploadLayerPart",
+        ]
+        Resource = aws_ecr_repository.training.arn
+      },
+    ]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "gha_training_ecr" {
+  role       = aws_iam_role.gha_training.name
+  policy_arn = aws_iam_policy.gha_training_ecr.arn
+}
+
+output "gha_training_role_arn" {
+  value       = aws_iam_role.gha_training.arn
+  description = "Set as the TRAINING_AWS_ROLE_ARN repo variable in GitHub Actions"
+}
