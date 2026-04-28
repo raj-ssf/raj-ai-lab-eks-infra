@@ -65,6 +65,16 @@ resource "kubectl_manifest" "shared_gateway" {
         "service.beta.kubernetes.io/aws-load-balancer-type"            = "nlb"
         "service.beta.kubernetes.io/aws-load-balancer-scheme"          = "internet-facing"
         "service.beta.kubernetes.io/aws-load-balancer-nlb-target-type" = "ip"
+        # Lab's VPC subnets aren't tagged with kubernetes.io/role/elb,
+        # so AWS LBC can't auto-discover them — Service stays in
+        # 'pending' with the error "unable to resolve at least one
+        # subnet (0 match VPC and tags: [kubernetes.io/role/elb])".
+        # The existing ingress-nginx-controller works around this by
+        # hardcoding the public subnets via this annotation. Same
+        # data source (data.aws_subnets.public.ids in vpc.tf) so this
+        # tracks any future subnet additions without code changes.
+        "service.beta.kubernetes.io/aws-load-balancer-subnets"                           = join(",", data.aws_subnets.public.ids)
+        "service.beta.kubernetes.io/aws-load-balancer-cross-zone-load-balancing-enabled" = "true"
       }
     }
     spec = {
@@ -82,7 +92,7 @@ resource "kubectl_manifest" "shared_gateway" {
                 # Cross-ns ref — requires ReferenceGrant in rag ns
                 # (see allow-gateway-cert-read.yaml in apps repo).
                 kind      = "Secret"
-                name      = "rag-service-tls"
+                name      = "rag-tls"
                 namespace = "rag"
               },
             ]
@@ -109,7 +119,7 @@ resource "kubectl_manifest" "shared_gateway" {
 }
 
 # ReferenceGrant: authorize the Gateway in gateway-system to read
-# the rag-service-tls Secret in rag.
+# the rag-tls Secret in rag.
 #
 # Gateway API's cross-namespace reference model: a Gateway listener
 # in NS-A pointing at a Secret in NS-B is REJECTED unless NS-B
@@ -139,7 +149,7 @@ resource "kubectl_manifest" "rag_cert_reference_grant" {
       to = [{
         group = ""        # core API group
         kind  = "Secret"
-        name  = "rag-service-tls"
+        name  = "rag-tls"
       }]
     }
   })
