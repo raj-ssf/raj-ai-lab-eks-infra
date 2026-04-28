@@ -159,6 +159,122 @@ resource "kubectl_manifest" "rag_cert_reference_grant" {
   ]
 }
 
+# Istio AuthorizationPolicy: allow the gateway pod's SA into the
+# rag namespace.
+#
+# When traffic flows external → NLB → gateway-system/Envoy → rag-service,
+# rag-service's istio-proxy sidecar enforces AuthorizationPolicies for
+# *inbound* traffic. The cluster-wide deny-all means an explicit
+# ALLOW per source principal is required. This is the moral equivalent
+# of allow-ingress-nginx (which lets the NGINX SA into rag): now we
+# need the same for the Istio Gateway's SA.
+#
+# Principal format: cluster.local/ns/<source-ns>/sa/<source-sa>
+# The Istio gateway controller auto-creates a ServiceAccount named
+# the same as the Gateway resource (shared-gateway-istio) in the
+# gateway namespace. That's the SPIFFE identity the gateway pod
+# presents on outbound mTLS to rag-service.
+#
+# Scoped to the rag namespace only — same per-app granularity as
+# the existing allow-ingress-nginx + allow-langgraph-service policies.
+# When other apps migrate to HTTPRoute, each will need a parallel
+# allow-gateway policy in its own namespace.
+# Patch the Istio-created gateway Deployment to land its pod in
+# us-west-2a, the AZ where the NLB has a subnet.
+#
+# Why this is needed:
+#   The NLB is internet-facing and has only ONE subnet attached
+#   (subnet-0b1efd3204b132ab6 in us-west-2a, the lab's only Public-
+#   tagged subnet). NLBs only forward traffic to targets in their
+#   own AZs — pods in us-west-2b/2c are reported as Target.NotInUse.
+#   The default Istio gateway controller creates a single-replica
+#   Deployment with no AZ constraint, so the pod can land anywhere.
+#
+# Why a null_resource patch instead of declarative:
+#   Istio 1.24's Gateway API support doesn't expose nodeAffinity via
+#   the Gateway resource (spec.infrastructure only handles labels +
+#   annotations). The escape valve is to patch the underlying
+#   Deployment after Istio creates it. Istio's controller doesn't
+#   continuously reconcile the Deployment spec, so this patch
+#   persists across normal cluster operations. If Istio is upgraded
+#   in a way that recreates the Deployment, taint this null_resource
+#   to re-apply.
+#
+# Alternative considered: 3 replicas with topologySpreadConstraints.
+# Wasteful (3× pods for a low-traffic lab) and odds-based — no
+# guarantee of an us-west-2a placement on every reschedule.
+#
+# Production fix would be: add subnets in 2b + 2c to the NLB so it
+# spans all AZs, then drop this patch. Lab VPC has only one
+# Public-tagged subnet though, so this lab-specific workaround
+# stays until the VPC topology changes.
+resource "null_resource" "gateway_nodeaffinity_patch" {
+  triggers = {
+    # Re-run the patch when the AZ constraint changes
+    target_zone = "us-west-2a"
+    # Track the gateway's identity so re-creation of the Gateway
+    # also re-triggers the patch
+    gateway_uid = kubectl_manifest.shared_gateway.uid
+  }
+
+  provisioner "local-exec" {
+    command = <<-EOT
+      kubectl -n gateway-system patch deployment shared-gateway-istio --type=strategic --patch '{
+        "spec": {
+          "template": {
+            "spec": {
+              "affinity": {
+                "nodeAffinity": {
+                  "requiredDuringSchedulingIgnoredDuringExecution": {
+                    "nodeSelectorTerms": [{
+                      "matchExpressions": [{
+                        "key": "topology.kubernetes.io/zone",
+                        "operator": "In",
+                        "values": ["${self.triggers.target_zone}"]
+                      }]
+                    }]
+                  }
+                }
+              }
+            }
+          }
+        }
+      }'
+    EOT
+  }
+
+  depends_on = [
+    kubectl_manifest.shared_gateway,
+  ]
+}
+
+resource "kubectl_manifest" "rag_authz_allow_gateway" {
+  yaml_body = yamlencode({
+    apiVersion = "security.istio.io/v1"
+    kind       = "AuthorizationPolicy"
+    metadata = {
+      name      = "allow-gateway-system"
+      namespace = "rag"
+    }
+    spec = {
+      action = "ALLOW"
+      rules = [{
+        from = [{
+          source = {
+            principals = [
+              "cluster.local/ns/gateway-system/sa/shared-gateway-istio",
+            ]
+          }
+        }]
+      }]
+    }
+  })
+
+  depends_on = [
+    kubectl_manifest.shared_gateway,
+  ]
+}
+
 # Label the rag namespace so HTTPRoutes there can attach to
 # shared-gateway via parentRef. This is the opt-in mechanism for
 # cross-namespace route attachment under Gateway API. Without this
