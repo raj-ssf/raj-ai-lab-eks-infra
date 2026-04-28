@@ -383,10 +383,10 @@ resource "kubectl_manifest" "chat_ui_app" {
         targetRevision = "HEAD"
         path           = "chat-ui/overlays/dev"
 
-        # Env-specific Ingress host injected here (same pattern as
-        # langgraph-service / rag-service / vllm). The hostname in the
-        # source manifest is a placeholder that gets replaced per
-        # environment without forking the manifest.
+        # Env-specific Ingress + HTTPRoute hosts injected here (same
+        # pattern as langgraph-service / rag-service / vllm). The
+        # hostname in the source manifest is a placeholder that gets
+        # replaced per environment without forking the manifest.
         kustomize = {
           patches = [
             {
@@ -400,6 +400,21 @@ resource "kubectl_manifest" "chat_ui_app" {
                   value: chat.${var.domain}
                 - op: replace
                   path: /spec/rules/0/host
+                  value: chat.${var.domain}
+              EOT
+            },
+            # Phase 5 of Gateway API migration: same host-substitution
+            # pattern for the new HTTPRoute. Coexists with the Ingress
+            # patch; both serve chat.${var.domain}, reachable through
+            # different NLBs until DNS cutover.
+            {
+              target = {
+                kind = "HTTPRoute"
+                name = "chat-ui"
+              }
+              patch = <<-EOT
+                - op: replace
+                  path: /spec/hostnames/0
                   value: chat.${var.domain}
               EOT
             },
