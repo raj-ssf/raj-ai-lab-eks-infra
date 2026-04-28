@@ -1,6 +1,16 @@
 resource "kubernetes_namespace" "keycloak" {
   metadata {
     name = "keycloak"
+    labels = {
+      # Mesh-injection label declared HERE so the kubernetes_namespace
+      # resource doesn't strip it on every TF run. (Previously
+      # kubernetes_labels.istio_injection["keycloak"] in istio.tf was
+      # adding it; kubernetes_namespace was removing it. The cycle
+      # caused keycloak pods to occasionally be admitted without an
+      # istio-proxy sidecar, which broke the gateway → keycloak path
+      # via force-mtls-keycloak DR — see Phase 12a debug log.)
+      "istio-injection" = "enabled"
+    }
   }
 }
 

@@ -1,6 +1,12 @@
 resource "kubernetes_namespace" "argocd" {
   metadata {
     name = "argocd"
+    labels = {
+      # Mesh-injection label declared HERE so the kubernetes_namespace
+      # resource doesn't strip it on every TF run. Same fix applied to
+      # keycloak.tf — see comment there for the full rationale.
+      "istio-injection" = "enabled"
+    }
   }
 }
 
