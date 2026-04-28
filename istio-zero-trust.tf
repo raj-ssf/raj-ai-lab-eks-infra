@@ -97,7 +97,16 @@ locals {
   # the langfuse namespace is later mesh-injected.
   force_mtls_targets = {
     argocd-server = { namespace = "argocd",   service = "argocd-server" }
-    keycloak      = { namespace = "keycloak", service = "keycloak" }
+    # keycloak removed 2026-04-28 — same rationale as langfuse-web's
+    # earlier removal: keycloak's pod has no istio-proxy sidecar (the
+    # istio-injection label on keycloak ns is unstable due to ArgoCD
+    # stripping it; new pods rolled by helm upgrades land without a
+    # sidecar). force-mtls on an unmeshed destination causes
+    # TLS_error: WRONG_VERSION_NUMBER → 503 from the gateway. After
+    # Phase 12b removes ingress-nginx, ALL the remaining force-mtls
+    # entries here become obsolete (they were workarounds for NGINX's
+    # auto-mTLS detection asymmetry, not needed for the meshed
+    # gateway-system Envoy). Cleanup deferred to a follow-up.
     rag-service   = { namespace = "rag",      service = "rag-service" }
     chat-ui       = { namespace = "chat",     service = "chat-ui" }
   }
