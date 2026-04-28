@@ -136,9 +136,10 @@ resource "kubectl_manifest" "vllm_app" {
         targetRevision = "HEAD"
         path           = "llm/overlays/dev"
 
-        # Env-specific Ingress host injected here (same pattern as rag-service).
-        # Pod Identity binding for the vllm SA lives in model-weights.tf — no
-        # annotation patch on the SA needed.
+        # Env-specific Ingress + HTTPRoute hosts injected here (same
+        # pattern as rag-service). Pod Identity binding for the vllm
+        # SA lives in model-weights.tf — no annotation patch on the
+        # SA needed.
         kustomize = {
           patches = [
             {
@@ -152,6 +153,19 @@ resource "kubectl_manifest" "vllm_app" {
                   value: llm.${var.domain}
                 - op: replace
                   path: /spec/rules/0/host
+                  value: llm.${var.domain}
+              EOT
+            },
+            # Phase 6 of Gateway API migration: HTTPRoute hostname
+            # placeholder rewrite. Coexists with the Ingress patch.
+            {
+              target = {
+                kind = "HTTPRoute"
+                name = "vllm"
+              }
+              patch = <<-EOT
+                - op: replace
+                  path: /spec/hostnames/0
                   value: llm.${var.domain}
               EOT
             },

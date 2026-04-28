@@ -71,6 +71,18 @@ locals {
       cert_secret_name = "chat-ui-tls"
       listener_name    = "chat-https"
     }
+    llm = {
+      namespace        = "llm"
+      hostname         = "llm.ekstest.com"
+      cert_secret_name = "vllm-tls"
+      listener_name    = "llm-https"
+    }
+    langfuse = {
+      namespace        = "langfuse"
+      hostname         = "langfuse.ekstest.com"
+      cert_secret_name = "langfuse-tls"
+      listener_name    = "langfuse-https"
+    }
   }
 
   # Allowlist of namespaces that may attach HTTPRoutes via parentRef.

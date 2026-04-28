@@ -177,6 +177,13 @@ resource "helm_release" "langfuse" {
             "cert-manager.io/cluster-issuer" = "letsencrypt-prod"
             # Traces can be bulky — bump body limit like we did for vllm.
             "nginx.ingress.kubernetes.io/proxy-body-size" = "32m"
+            # Phase 7 of Gateway API migration: opt out of ExternalDNS
+            # so this Helm-managed Ingress no longer competes with
+            # the langfuse HTTPRoute (kubectl_manifest in this file)
+            # for the langfuse.ekstest.com record. cert-manager
+            # renewal continues unaffected. See rag-service Ingress
+            # for full rationale.
+            "external-dns.alpha.kubernetes.io/controller" = "skip-migrated"
           }
           hosts = [
             {
@@ -312,4 +319,53 @@ resource "helm_release" "langfuse" {
 output "langfuse_url" {
   value       = "https://langfuse.${var.domain}"
   description = "Langfuse UI — initial account is created via sign-up on first visit"
+}
+
+# =============================================================================
+# Phase 7 of Gateway API migration: HTTPRoute for langfuse.ekstest.com.
+#
+# Helm-managed apps (langfuse, grafana, vault, argocd, keycloak) have no
+# apps-repo dir, so the HTTPRoute lives here in TF as a kubectl_manifest
+# alongside the helm_release. Per-app shape (RG + AuthZ in target ns) is
+# emitted by the gateway-app module via the local.gateway_apps map in
+# gateway-system.tf.
+#
+# Why HTTPRoute is in the same TF file as the helm_release: keeps the app's
+# routing definition next to its other infra wiring (namespace, secrets,
+# Keycloak client). Mirroring the apps-repo pattern of "HTTPRoute lives
+# with the app's other manifests."
+# =============================================================================
+
+resource "kubectl_manifest" "langfuse_httproute" {
+  yaml_body = yamlencode({
+    apiVersion = "gateway.networking.k8s.io/v1"
+    kind       = "HTTPRoute"
+    metadata = {
+      name      = "langfuse"
+      namespace = "langfuse"
+      labels    = { app = "langfuse" }
+    }
+    spec = {
+      parentRefs = [{
+        name        = "shared-gateway"
+        namespace   = "gateway-system"
+        sectionName = "langfuse-https"
+      }]
+      hostnames = ["langfuse.${var.domain}"]
+      rules = [{
+        matches = [{
+          path = { type = "PathPrefix", value = "/" }
+        }]
+        backendRefs = [{
+          # langfuse-web Service exposes port 3000 (named "http").
+          name = "langfuse-web"
+          port = 3000
+        }]
+      }]
+    }
+  })
+
+  depends_on = [
+    helm_release.langfuse,
+  ]
 }
