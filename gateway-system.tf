@@ -83,6 +83,18 @@ locals {
       cert_secret_name = "langfuse-tls"
       listener_name    = "langfuse-https"
     }
+    grafana = {
+      namespace        = "monitoring"
+      hostname         = "grafana.ekstest.com"
+      cert_secret_name = "grafana-tls"
+      listener_name    = "grafana-https"
+    }
+    vault = {
+      namespace        = "vault"
+      hostname         = "vault.ekstest.com"
+      cert_secret_name = "vault-tls"
+      listener_name    = "vault-https"
+    }
   }
 
   # Allowlist of namespaces that may attach HTTPRoutes via parentRef.

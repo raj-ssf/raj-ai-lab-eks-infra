@@ -133,6 +133,13 @@ resource "helm_release" "kube_prometheus_stack" {
           ingressClassName = "nginx"
           annotations = {
             "cert-manager.io/cluster-issuer" = "letsencrypt-prod"
+            # Phase 8 of Gateway API migration: opt out of ExternalDNS
+            # so this Helm-managed Ingress no longer competes with the
+            # grafana HTTPRoute (kubectl_manifest in this file) for
+            # the grafana.ekstest.com record. cert-manager renewal
+            # continues unaffected. See rag-service Ingress for full
+            # rationale.
+            "external-dns.alpha.kubernetes.io/controller" = "skip-migrated"
           }
           hosts = ["grafana.${var.domain}"]
           tls = [{
@@ -280,4 +287,44 @@ resource "helm_release" "kube_prometheus_stack" {
 output "grafana_admin_password_hint" {
   value       = "kubectl -n monitoring get secret kube-prometheus-stack-grafana -o jsonpath='{.data.admin-password}' | base64 -d"
   description = "Command to retrieve the Grafana admin password from the Secret"
+}
+
+# =============================================================================
+# Phase 8 of Gateway API migration: HTTPRoute for grafana.ekstest.com.
+# Sibling to the helm_release; see langfuse.tf for the pattern's rationale.
+# =============================================================================
+
+resource "kubectl_manifest" "grafana_httproute" {
+  yaml_body = yamlencode({
+    apiVersion = "gateway.networking.k8s.io/v1"
+    kind       = "HTTPRoute"
+    metadata = {
+      name      = "grafana"
+      namespace = "monitoring"
+      labels    = { app = "grafana" }
+    }
+    spec = {
+      parentRefs = [{
+        name        = "shared-gateway"
+        namespace   = "gateway-system"
+        sectionName = "grafana-https"
+      }]
+      hostnames = ["grafana.${var.domain}"]
+      rules = [{
+        matches = [{
+          path = { type = "PathPrefix", value = "/" }
+        }]
+        backendRefs = [{
+          # kube-prometheus-stack-grafana Service exposes port 80
+          # (named "http-web", targetPort 3000).
+          name = "kube-prometheus-stack-grafana"
+          port = 80
+        }]
+      }]
+    }
+  })
+
+  depends_on = [
+    helm_release.kube_prometheus_stack,
+  ]
 }
