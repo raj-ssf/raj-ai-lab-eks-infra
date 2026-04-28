@@ -72,9 +72,16 @@ resource "helm_release" "external_dns" {
       domainFilters = [var.domain]
       policy        = "upsert-only"
       txtOwnerId    = var.cluster_name
+      # During the Ingress → Gateway API migration, both sources are
+      # active simultaneously. Each source emits Route53 records
+      # independently; the txt-registry uses owner-id+host as the key
+      # so duplicate records (same host from both an Ingress and an
+      # HTTPRoute) are deduplicated cleanly. After the last Ingress is
+      # removed, drop "ingress" from this list.
       sources = [
         "service",
         "ingress",
+        "gateway-httproute",
       ]
       registry = "txt"
       logLevel = "info"
