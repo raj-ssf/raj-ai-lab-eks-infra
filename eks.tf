@@ -58,10 +58,18 @@ module "eks" {
     coredns                = {
       most_recent                 = true
       resolve_conflicts_on_update = "OVERWRITE"
-      # Rewrite keycloak.<domain> to the in-cluster ingress-nginx Service.
-      # Without this, pods resolving keycloak.<domain> get the NLB public IP
-      # and AWS drops the hairpin loopback with "connection reset by peer".
-      # This full Corefile mirrors the EKS default + one `rewrite` line.
+      # Rewrite keycloak.<domain> to the in-cluster Istio Gateway Service.
+      # Without a rewrite, pods resolving keycloak.<domain> get the NLB
+      # public IP and AWS drops the hairpin loopback with "connection
+      # reset by peer". The rewrite keeps in-cluster keycloak traffic
+      # in-cluster (no NLB hairpin), and the Istio Gateway Service
+      # terminates TLS via the keycloak-https listener + routes to
+      # keycloak via HTTPRoute.
+      #
+      # Pre-2026-04-28: this rewrote to the (now-deleted) ingress-nginx
+      # Service. After Phase 12b decommissioned ingress-nginx, that
+      # Service vanished → NXDOMAIN → broke ALL in-cluster OIDC flows
+      # (argocd-server, langfuse-web, grafana token exchange).
       configuration_values = jsonencode({
         corefile = <<-EOT
           .:53 {
@@ -70,7 +78,7 @@ module "eks" {
                   lameduck 5s
               }
               ready
-              rewrite name keycloak.${var.domain} ingress-nginx-controller.ingress-nginx.svc.cluster.local
+              rewrite name keycloak.${var.domain} shared-gateway-istio.gateway-system.svc.cluster.local
               kubernetes cluster.local in-addr.arpa ip6.arpa {
                   pods insecure
                   fallthrough in-addr.arpa ip6.arpa
