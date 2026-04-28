@@ -291,7 +291,6 @@ resource "helm_release" "langfuse" {
 
   depends_on = [
     module.eks,
-    helm_release.ingress_nginx,
     helm_release.cert_manager,
     # Keycloak OIDC client must exist before langfuse-web starts, so the
     # first NextAuth signin attempt doesn't 500 on "unknown_client".

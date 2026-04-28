@@ -137,7 +137,6 @@ resource "kubectl_manifest" "force_mtls" {
 
   depends_on = [
     helm_release.istiod,
-    helm_release.ingress_nginx,
   ]
 }
 
@@ -196,7 +195,6 @@ resource "kubectl_manifest" "ingress_nginx_no_mtls" {
 
   depends_on = [
     helm_release.istiod,
-    helm_release.ingress_nginx,
   ]
 }
 
@@ -243,7 +241,6 @@ resource "kubectl_manifest" "deny_all_mesh_wide" {
   # rules below wouldn't match — briefly breaking north-south traffic.
   depends_on = [
     helm_release.istiod,
-    helm_release.ingress_nginx,
     kubectl_manifest.force_mtls,
   ]
 }
@@ -309,7 +306,6 @@ resource "kubectl_manifest" "allow_ingress_nginx" {
   depends_on = [
     helm_release.istiod,
     kubectl_manifest.deny_all_mesh_wide,
-    helm_release.ingress_nginx,
   ]
 }
 
@@ -366,7 +362,6 @@ resource "kubectl_manifest" "allow_intra_namespace" {
   depends_on = [
     helm_release.istiod,
     kubectl_manifest.deny_all_mesh_wide,
-    helm_release.ingress_nginx,
   ]
 }
 
