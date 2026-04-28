@@ -77,29 +77,10 @@ resource "helm_release" "argocd" {
       server = {
         service = { type = "ClusterIP" }
 
+        # Phase 12 of Gateway API migration: chart's Ingress disabled.
+        # Traffic now flows through shared-gateway in gateway-system ns.
         ingress = {
-          enabled          = true
-          ingressClassName = "nginx"
-          hostname         = "argocd.${var.domain}"
-          annotations = {
-            "cert-manager.io/cluster-issuer"                   = "letsencrypt-prod"
-            "nginx.ingress.kubernetes.io/backend-protocol"     = "HTTP"
-            # argocd-server serves WebSockets on /api/v1/stream/...; bump
-            # proxy timeouts so long-lived streams don't get cut off.
-            "nginx.ingress.kubernetes.io/proxy-read-timeout"   = "1800"
-            "nginx.ingress.kubernetes.io/proxy-send-timeout"   = "1800"
-            # Phase 9 of Gateway API migration: opt out of ExternalDNS
-            # so this Helm-managed Ingress no longer competes with the
-            # argocd HTTPRoute for the argocd.ekstest.com record.
-            # cert-manager renewal continues unaffected. See rag-service
-            # Ingress for full rationale.
-            "external-dns.alpha.kubernetes.io/controller"      = "skip-migrated"
-          }
-          tls = true
-          extraTls = [{
-            hosts      = ["argocd.${var.domain}"]
-            secretName = "argocd-tls"
-          }]
+          enabled = false
         }
       }
     })

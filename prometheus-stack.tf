@@ -127,25 +127,10 @@ resource "helm_release" "kube_prometheus_stack" {
           type = "ClusterIP"
         }
 
-        # Ingress → NGINX → Let's Encrypt cert for grafana.<domain>.
+        # Phase 12 of Gateway API migration: chart's Ingress disabled.
+        # Traffic now flows through shared-gateway in gateway-system ns.
         ingress = {
-          enabled          = true
-          ingressClassName = "nginx"
-          annotations = {
-            "cert-manager.io/cluster-issuer" = "letsencrypt-prod"
-            # Phase 8 of Gateway API migration: opt out of ExternalDNS
-            # so this Helm-managed Ingress no longer competes with the
-            # grafana HTTPRoute (kubectl_manifest in this file) for
-            # the grafana.ekstest.com record. cert-manager renewal
-            # continues unaffected. See rag-service Ingress for full
-            # rationale.
-            "external-dns.alpha.kubernetes.io/controller" = "skip-migrated"
-          }
-          hosts = ["grafana.${var.domain}"]
-          tls = [{
-            hosts      = ["grafana.${var.domain}"]
-            secretName = "grafana-tls"
-          }]
+          enabled = false
         }
 
         # Set Grafana's idea of its own URL so sign-in redirects, share links,

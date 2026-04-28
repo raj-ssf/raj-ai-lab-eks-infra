@@ -170,31 +170,14 @@ resource "helm_release" "langfuse" {
           }
         }
 
+        # Phase 12 of Gateway API migration: chart's Ingress disabled.
+        # Traffic now flows exclusively through shared-gateway in
+        # gateway-system ns. cert-manager Certificate langfuse-tls
+        # in this namespace is now an orphan-but-renewing standalone
+        # resource (ingress-shim no longer manages it; cert-manager
+        # renews based on the Certificate spec).
         ingress = {
-          enabled   = true
-          className = "nginx"
-          annotations = {
-            "cert-manager.io/cluster-issuer" = "letsencrypt-prod"
-            # Traces can be bulky — bump body limit like we did for vllm.
-            "nginx.ingress.kubernetes.io/proxy-body-size" = "32m"
-            # Phase 7 of Gateway API migration: opt out of ExternalDNS
-            # so this Helm-managed Ingress no longer competes with
-            # the langfuse HTTPRoute (kubectl_manifest in this file)
-            # for the langfuse.ekstest.com record. cert-manager
-            # renewal continues unaffected. See rag-service Ingress
-            # for full rationale.
-            "external-dns.alpha.kubernetes.io/controller" = "skip-migrated"
-          }
-          hosts = [
-            {
-              host = "langfuse.${var.domain}"
-              paths = [{ path = "/", pathType = "Prefix" }]
-            },
-          ]
-          tls = {
-            enabled    = true
-            secretName = "langfuse-tls"
-          }
+          enabled = false
         }
       }
 

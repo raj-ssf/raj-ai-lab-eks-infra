@@ -196,27 +196,10 @@ resource "helm_release" "keycloak" {
       # Ingress → NGINX → cert-manager issues LE prod cert.
       # proxy-buffer-size bump: JWT-carrying auth responses overflow the 4k
       # default and return 502 otherwise.
+      # Phase 12 of Gateway API migration: chart's Ingress disabled.
+      # Traffic now flows through shared-gateway in gateway-system ns.
       ingress = {
-        enabled          = true
-        ingressClassName = "nginx"
-        hostname         = "keycloak.${var.domain}"
-        annotations = {
-          "cert-manager.io/cluster-issuer"                 = "letsencrypt-prod"
-          "nginx.ingress.kubernetes.io/proxy-buffer-size"  = "16k"
-          # Phase 11 (final app) of Gateway API migration: opt out of
-          # ExternalDNS so this Helm-managed Ingress no longer competes
-          # with the keycloak HTTPRoute (kubectl_manifest below) for
-          # the keycloak.ekstest.com record. cert-manager renewal
-          # continues unaffected. See rag-service Ingress for the
-          # full rationale.
-          "external-dns.alpha.kubernetes.io/controller"    = "skip-migrated"
-        }
-        tls        = true
-        selfSigned = false
-        extraTls = [{
-          hosts      = ["keycloak.${var.domain}"]
-          secretName = "keycloak-tls"
-        }]
+        enabled = false
       }
     })
   ]

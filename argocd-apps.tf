@@ -61,26 +61,10 @@ resource "kubectl_manifest" "rag_service_app" {
         # the public app repo). SA role binding is handled by
         # aws_eks_pod_identity_association.rag_service in
         # bedrock-irsa.tf — no annotation needed on the SA.
+        # Post-Phase 12: legacy Ingress removed; only the HTTPRoute
+        # hostname patch remains.
         kustomize = {
           patches = [
-            {
-              target = {
-                kind = "Ingress"
-                name = "rag-service"
-              }
-              patch = <<-EOT
-                - op: replace
-                  path: /spec/tls/0/hosts/0
-                  value: rag.${var.domain}
-                - op: replace
-                  path: /spec/rules/0/host
-                  value: rag.${var.domain}
-              EOT
-            },
-            # Phase 2 of Gateway API migration: same host-substitution
-            # pattern for the new HTTPRoute. Coexists with the Ingress
-            # patch above; both resources serve rag.${var.domain},
-            # reachable through different NLBs until DNS cutover.
             {
               target = {
                 kind = "HTTPRoute"
@@ -140,24 +124,10 @@ resource "kubectl_manifest" "vllm_app" {
         # pattern as rag-service). Pod Identity binding for the vllm
         # SA lives in model-weights.tf — no annotation patch on the
         # SA needed.
+        # Post-Phase 12: legacy Ingress removed; only the HTTPRoute
+        # hostname patch remains.
         kustomize = {
           patches = [
-            {
-              target = {
-                kind = "Ingress"
-                name = "vllm"
-              }
-              patch = <<-EOT
-                - op: replace
-                  path: /spec/tls/0/hosts/0
-                  value: llm.${var.domain}
-                - op: replace
-                  path: /spec/rules/0/host
-                  value: llm.${var.domain}
-              EOT
-            },
-            # Phase 6 of Gateway API migration: HTTPRoute hostname
-            # placeholder rewrite. Coexists with the Ingress patch.
             {
               target = {
                 kind = "HTTPRoute"
@@ -322,24 +292,8 @@ resource "kubectl_manifest" "langgraph_app" {
         # without forking the manifest.
         kustomize = {
           patches = [
-            {
-              target = {
-                kind = "Ingress"
-                name = "langgraph-service"
-              }
-              patch = <<-EOT
-                - op: replace
-                  path: /spec/tls/0/hosts/0
-                  value: langgraph.${var.domain}
-                - op: replace
-                  path: /spec/rules/0/host
-                  value: langgraph.${var.domain}
-              EOT
-            },
-            # Phase 4 of Gateway API migration: same host-substitution
-            # for the new HTTPRoute. Coexists with the Ingress patch
-            # above; both serve langgraph.${var.domain}, reachable
-            # through different NLBs until DNS cutover.
+            # Post-Phase 12: legacy Ingress removed; only the HTTPRoute
+            # hostname patch remains.
             {
               target = {
                 kind = "HTTPRoute"
@@ -401,26 +355,10 @@ resource "kubectl_manifest" "chat_ui_app" {
         # pattern as langgraph-service / rag-service / vllm). The
         # hostname in the source manifest is a placeholder that gets
         # replaced per environment without forking the manifest.
+        # Post-Phase 12: legacy Ingress removed; only the HTTPRoute
+        # hostname patch remains.
         kustomize = {
           patches = [
-            {
-              target = {
-                kind = "Ingress"
-                name = "chat-ui"
-              }
-              patch = <<-EOT
-                - op: replace
-                  path: /spec/tls/0/hosts/0
-                  value: chat.${var.domain}
-                - op: replace
-                  path: /spec/rules/0/host
-                  value: chat.${var.domain}
-              EOT
-            },
-            # Phase 5 of Gateway API migration: same host-substitution
-            # pattern for the new HTTPRoute. Coexists with the Ingress
-            # patch; both serve chat.${var.domain}, reachable through
-            # different NLBs until DNS cutover.
             {
               target = {
                 kind = "HTTPRoute"

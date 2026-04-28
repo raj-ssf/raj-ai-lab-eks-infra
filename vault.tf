@@ -92,27 +92,10 @@ resource "helm_release" "vault" {
           limits   = { cpu = "500m", memory = "512Mi" }
         }
 
-        # Ingress → NGINX → cert-manager (LE prod).
+        # Phase 12 of Gateway API migration: chart's Ingress disabled.
+        # Traffic now flows through shared-gateway in gateway-system ns.
         ingress = {
-          enabled          = true
-          ingressClassName = "nginx"
-          hosts = [{
-            host  = "vault.${var.domain}"
-            paths = []
-          }]
-          annotations = {
-            "cert-manager.io/cluster-issuer" = "letsencrypt-prod"
-            # Phase 8 of Gateway API migration: opt out of ExternalDNS
-            # so this Helm-managed Ingress no longer competes with the
-            # vault HTTPRoute (kubectl_manifest below) for the
-            # vault.ekstest.com record. cert-manager renewal continues
-            # unaffected. See rag-service Ingress for full rationale.
-            "external-dns.alpha.kubernetes.io/controller" = "skip-migrated"
-          }
-          tls = [{
-            hosts      = ["vault.${var.domain}"]
-            secretName = "vault-tls"
-          }]
+          enabled = false
         }
 
         # Readiness needs Vault unsealed; during first boot (before init) the
