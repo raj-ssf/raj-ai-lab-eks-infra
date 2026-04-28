@@ -139,12 +139,28 @@ resource "helm_release" "keycloak" {
       # KC_HOSTNAME_STRICT=false lets us hit the pod via ClusterIP/port-forward
       # for debugging without tripping Keycloak's hostname check.
       #
+      # KC_HOSTNAME as a FULL URL (with https:// scheme) is required so that
+      # Keycloak emits https URLs in OIDC discovery responses regardless of
+      # the request's protocol. WITHOUT this fix, cluster-internal requests
+      # arriving over plain HTTP (server-side token exchange via
+      # http://keycloak.keycloak.svc.cluster.local) caused Keycloak to
+      # respond with http:// URLs in /.well-known/openid-configuration AND
+      # in the issuer claim of JWTs — which broke OIDC consumers (argocd,
+      # grafana, langfuse, chat-ui) because they expected the issuer to
+      # match their configured https://keycloak.ekstest.com/realms/...
+      # canonical URL. Symptom: login flow completed at the browser but
+      # the consumer rejected the token with iss-mismatch errors. Diagnosed
+      # 2026-04-28 after Phase 12b decommissioned ingress-nginx (NGINX had
+      # been masking this by terminating TLS for cluster-internal callers
+      # too via its X-Forwarded-Proto headers — Istio Gateway doesn't sit
+      # in the cluster-internal path, so the asymmetry surfaced).
+      #
       # KC_DB_PASSWORD uses Keycloak's `file:` config-source prefix, which
       # reads the value at startup from the injected Vault Agent sidecar
       # file. Applies to any KC_* option; this is Keycloak's equivalent of
       # Grafana's GF_*__FILE convention.
       extraEnvVars = [
-        { name = "KC_HOSTNAME",       value = "keycloak.${var.domain}" },
+        { name = "KC_HOSTNAME",       value = "https://keycloak.${var.domain}" },
         { name = "KC_HOSTNAME_STRICT", value = "false" },
         { name = "KC_HTTP_ENABLED",   value = "true" },
         { name = "KC_HEALTH_ENABLED", value = "true" },
