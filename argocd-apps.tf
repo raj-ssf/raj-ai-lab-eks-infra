@@ -269,6 +269,15 @@ resource "kubectl_manifest" "vllm_app" {
           namespace    = "llm"
           jsonPointers = ["/spec/replicas"]
         },
+        {
+          # bge-reranker (TEI cross-encoder, RAG completeness phase).
+          # Same scale-to-zero default + manual spin-up pattern.
+          group        = "apps"
+          kind         = "Deployment"
+          name         = "vllm-bge-reranker"
+          namespace    = "llm"
+          jsonPointers = ["/spec/replicas"]
+        },
       ]
       syncPolicy = {
         automated = {
