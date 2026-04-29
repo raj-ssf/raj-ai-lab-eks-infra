@@ -159,6 +159,25 @@ resource "keycloak_openid_client" "chat_ui" {
   direct_access_grants_enabled = false
   service_accounts_enabled     = false
 
+  # Override the realm's default access-token lifespan (5 min) just for
+  # this client. Without an override, long-running chat conversations
+  # got booted at the 5-min mark — Chainlit's KeycloakOAuthProvider
+  # stashes the access_token at login but doesn't auto-refresh, so
+  # downstream calls (chat-ui → langgraph-service → bearer token check)
+  # start returning 401 once the token expires.
+  #
+  # 1-hour bump buys most users a single uninterrupted session without
+  # requiring app-side refresh-token code. For sessions that genuinely
+  # need to outlive 1h, the proper fix is implementing the refresh-token
+  # flow in the Chainlit app (POST /protocol/openid-connect/token with
+  # grant_type=refresh_token) — deferred until/unless 1h proves
+  # insufficient in practice.
+  #
+  # Other clients in the realm (langgraph-service, langfuse, etc.) are
+  # unaffected — they keep the realm default. Service clients want
+  # shorter tokens for tighter blast-radius on credential leaks.
+  access_token_lifespan = "3600"
+
   # PKCE intentionally NOT required. Chainlit's KeycloakOAuthProvider
   # (chainlit/oauth_providers.py) doesn't send code_challenge /
   # code_challenge_method on the authorize request. With PKCE required
