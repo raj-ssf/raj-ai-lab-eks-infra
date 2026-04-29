@@ -496,6 +496,29 @@ resource "kubectl_manifest" "chat_ui_app" {
         server    = "https://kubernetes.default.svc"
         namespace = "chat"
       }
+      # Phase #40: blueGreen strategy. argo-rollouts mutates the
+      # selector on BOTH the activeService (chat-ui) and the
+      # previewService (chat-ui-preview) at promote time. selfHeal
+      # would yank both back to the bare app=chat-ui selector and
+      # break the blueGreen split.
+      ignoreDifferences = [
+        {
+          group = ""
+          kind  = "Service"
+          name  = "chat-ui"
+          jsonPointers = [
+            "/spec/selector",
+          ]
+        },
+        {
+          group = ""
+          kind  = "Service"
+          name  = "chat-ui-preview"
+          jsonPointers = [
+            "/spec/selector",
+          ]
+        },
+      ]
       syncPolicy = {
         automated = {
           prune    = true
@@ -586,6 +609,36 @@ resource "kubectl_manifest" "ingestion_service_app" {
         server    = "https://kubernetes.default.svc"
         namespace = "ingestion"
       }
+      # Phase #39: argo-rollouts canary mutates VS weights and the
+      # injected Service selectors at runtime. Same pattern as
+      # langgraph + rag (Phase #31, #35).
+      ignoreDifferences = [
+        {
+          group = "networking.istio.io"
+          kind  = "VirtualService"
+          name  = "ingestion-service-canary-vs"
+          jsonPointers = [
+            "/spec/http/0/route/0/weight",
+            "/spec/http/0/route/1/weight",
+          ]
+        },
+        {
+          group = ""
+          kind  = "Service"
+          name  = "ingestion-service-stable"
+          jsonPointers = [
+            "/spec/selector",
+          ]
+        },
+        {
+          group = ""
+          kind  = "Service"
+          name  = "ingestion-service-canary"
+          jsonPointers = [
+            "/spec/selector",
+          ]
+        },
+      ]
       syncPolicy = {
         automated = {
           prune    = true
