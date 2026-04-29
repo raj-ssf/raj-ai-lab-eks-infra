@@ -73,15 +73,22 @@ resource "random_bytes" "oauth2_proxy_cookie_secret" {
 
 resource "kubernetes_secret" "oauth2_proxy" {
   metadata {
-    name      = "oauth2-proxy"
+    # Name deliberately NOT "oauth2-proxy" — that conflicts with
+    # the helm chart's auto-created Secret (named after the release).
+    # Use a -creds suffix so the chart can manage its own Secret
+    # and we can hold the Keycloak/cookie secrets in a separate one
+    # that the chart references via config.existingSecret.
+    name      = "oauth2-proxy-creds"
     namespace = kubernetes_namespace.argo_rollouts.metadata[0].name
   }
   type = "Opaque"
   data = {
+    # Key names match what oauth2-proxy/manifests chart 7.x expects
+    # when reading from existingSecret: client-id, client-secret,
+    # cookie-secret. Renaming any of these breaks the chart's env
+    # mapping and oauth2-proxy starts up with empty credentials.
     client-id     = keycloak_openid_client.rollouts_dashboard.client_id
     client-secret = keycloak_openid_client.rollouts_dashboard.client_secret
-    # base64 of the 32 random bytes — what oauth2-proxy's chart
-    # expects in `config.cookieSecret`.
     cookie-secret = random_bytes.oauth2_proxy_cookie_secret.base64
   }
 }
@@ -97,14 +104,21 @@ resource "helm_release" "oauth2_proxy" {
 
   values = [
     yamlencode({
-      # Reference the Secret created above instead of inlining
-      # secrets in helm values (which would land in the helm release
-      # state in plaintext-readable form).
-      configuration = {
+      # Chart values key path is `config.*` (NOT `configuration.*` —
+      # that was a wrong guess on first attempt; using the wrong key
+      # silently accepts the values as ad-hoc fields and falls back
+      # to chart defaults, which means existingSecret was never set
+      # and the chart tried to create its own "oauth2-proxy" Secret
+      # that collided with the kubernetes_secret resource above).
+      config = {
+        # Reference the separate -creds Secret rather than inlining
+        # secrets in helm values (which would land in the release
+        # state in plaintext-readable form).
         existingSecret = kubernetes_secret.oauth2_proxy.metadata[0].name
-        # Explicit content — Args take precedence over the
-        # extraEnv / config block in older chart versions.
-        content = <<-EOT
+        # The full oauth2-proxy config file body. The chart writes
+        # this into a ConfigMap and starts oauth2-proxy with
+        # --config=/etc/oauth2_proxy/oauth2_proxy.cfg.
+        configFile = <<-EOT
           provider = "oidc"
           oidc_issuer_url = "https://keycloak.${var.domain}/realms/${var.cluster_name}"
           redirect_url = "https://rollouts.${var.domain}/oauth2/callback"
