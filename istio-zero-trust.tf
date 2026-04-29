@@ -484,3 +484,79 @@ resource "kubectl_manifest" "allow_langgraph_to_rag" {
     kubectl_manifest.deny_all_mesh_wide,
   ]
 }
+
+# Fine-tuning F4: eval-pod (in the llm namespace) needs to call the
+# vllm-llama-8b Service to compare base vs LoRA-merged inference. The
+# mesh-wide deny-all blocks even same-namespace traffic unless an ALLOW
+# policy admits the source principal — without this, the eval Job's
+# requests get 403 'RBAC: access denied' from Istio at the vLLM
+# sidecar's RBAC filter (verified the failure mode in run 4).
+#
+# Same shape as allow-rag-service / allow-langgraph-service / etc.
+# Scoped to a single SA principal so that future llm-namespace
+# workloads have to be allowlisted explicitly.
+resource "kubectl_manifest" "allow_eval_to_llm" {
+  yaml_body = yamlencode({
+    apiVersion = "security.istio.io/v1"
+    kind       = "AuthorizationPolicy"
+    metadata = {
+      name      = "allow-eval-pod"
+      namespace = "llm"
+    }
+    spec = {
+      action = "ALLOW"
+      rules = [
+        {
+          from = [{
+            source = {
+              principals = [
+                "cluster.local/ns/llm/sa/eval-pod",
+              ]
+            }
+          }]
+        },
+      ]
+    }
+  })
+
+  depends_on = [
+    helm_release.istiod,
+    kubectl_manifest.deny_all_mesh_wide,
+  ]
+}
+
+# Eval (optional) emits a Langfuse trace summarizing each run. Same
+# cross-namespace pattern as allow_langgraph_to_langfuse — the
+# langfuse namespace's mesh-wide deny-all blocks the eval pod's
+# trace POST without this rule. Scoped to the eval-pod SA only.
+# The eval Job no-ops Langfuse if LANGFUSE_PUBLIC_KEY env is unset,
+# so this rule is harmless even before the user creates the Secret.
+resource "kubectl_manifest" "allow_eval_to_langfuse" {
+  yaml_body = yamlencode({
+    apiVersion = "security.istio.io/v1"
+    kind       = "AuthorizationPolicy"
+    metadata = {
+      name      = "allow-eval-pod"
+      namespace = "langfuse"
+    }
+    spec = {
+      action = "ALLOW"
+      rules = [
+        {
+          from = [{
+            source = {
+              principals = [
+                "cluster.local/ns/llm/sa/eval-pod",
+              ]
+            }
+          }]
+        },
+      ]
+    }
+  })
+
+  depends_on = [
+    helm_release.istiod,
+    kubectl_manifest.deny_all_mesh_wide,
+  ]
+}
