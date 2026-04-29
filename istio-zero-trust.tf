@@ -45,6 +45,19 @@
 #   * Kubelet probes — handled by Istio's rewriteAppHTTPProbes feature
 #     (default true) which routes probes through the sidecar with
 #     metadata that bypasses mTLS.
+#
+#   * argo-rollouts (argo-rollouts ns) → prometheus (monitoring ns)
+#     for AnalysisRun queries. Confirmed working 2026-04-29 via direct
+#     curl — both namespaces are unmeshed (argo-rollouts deliberately
+#     so per argo-rollouts.tf, monitoring per the unmeshed-by-default
+#     pattern), so the request is plain Kubernetes networking and
+#     Istio AuthZ doesn't apply. NO AuthorizationPolicy is needed for
+#     this path today. If monitoring is ever flipped to meshed (the
+#     "best" mitigation noted above for prometheus scraping),
+#     argo-rollouts AnalysisRun queries WILL break and an allow_argo_
+#     rollouts_to_prometheus rule will need to be added — preferably
+#     gated to source SA argo-rollouts/argo-rollouts-controller and
+#     paths /api/v1/query, /api/v1/query_range only.
 
 # =============================================================================
 # Removed 2026-04-28 (post-Gateway-API cleanup):
