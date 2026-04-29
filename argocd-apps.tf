@@ -105,6 +105,38 @@ resource "kubectl_manifest" "rag_service_app" {
         server    = "https://kubernetes.default.svc"
         namespace = "rag"
       }
+      # Phase #35: ignore fields that argo-rollouts mutates at
+      # runtime, so ArgoCD's selfHeal doesn't fight the controller.
+      # RespectIgnoreDifferences=true (added to syncOptions below)
+      # is what wires this through to actual sync behavior. Without
+      # that flag the field is informational only on the diff view.
+      ignoreDifferences = [
+        {
+          group = "networking.istio.io"
+          kind  = "VirtualService"
+          name  = "rag-service-canary-vs"
+          jsonPointers = [
+            "/spec/http/0/route/0/weight",
+            "/spec/http/0/route/1/weight",
+          ]
+        },
+        {
+          group = ""
+          kind  = "Service"
+          name  = "rag-service-stable"
+          jsonPointers = [
+            "/spec/selector",
+          ]
+        },
+        {
+          group = ""
+          kind  = "Service"
+          name  = "rag-service-canary"
+          jsonPointers = [
+            "/spec/selector",
+          ]
+        },
+      ]
       syncPolicy = {
         automated = {
           prune    = true
@@ -113,6 +145,9 @@ resource "kubectl_manifest" "rag_service_app" {
         syncOptions = [
           "CreateNamespace=true",
           "PrunePropagationPolicy=foreground",
+          # Phase #35: required for ignoreDifferences above to
+          # actually exempt the listed fields from selfHeal.
+          "RespectIgnoreDifferences=true",
         ]
       }
     }
