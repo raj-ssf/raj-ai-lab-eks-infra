@@ -355,6 +355,47 @@ resource "kubectl_manifest" "langgraph_app" {
         server    = "https://kubernetes.default.svc"
         namespace = "langgraph"
       }
+      # Phase #31: ignore fields that argo-rollouts mutates at
+      # runtime, so ArgoCD's selfHeal doesn't fight the controller.
+      # RespectIgnoreDifferences=true (in syncOptions below) is what
+      # actually wires this up — without that flag the field is
+      # just informational on the diff view.
+      ignoreDifferences = [
+        # VirtualService route weights — mutated at every canary
+        # step (setWeight 0/10/50/100 → corresponding weights on
+        # the two destinations). Two pointers because the route
+        # has two destinations (stable + canary).
+        {
+          group = "networking.istio.io"
+          kind  = "VirtualService"
+          name  = "langgraph-service-canary-vs"
+          jsonPointers = [
+            "/spec/http/0/route/0/weight",
+            "/spec/http/0/route/1/weight",
+          ]
+        },
+        # -stable / -canary Service selectors. argo-rollouts injects
+        # rollouts-pod-template-hash so each Service targets only
+        # the pods of its respective ReplicaSet. Without this
+        # ignore, selfHeal would strip the injected label and break
+        # the canary's traffic isolation.
+        {
+          group = ""
+          kind  = "Service"
+          name  = "langgraph-service-stable"
+          jsonPointers = [
+            "/spec/selector",
+          ]
+        },
+        {
+          group = ""
+          kind  = "Service"
+          name  = "langgraph-service-canary"
+          jsonPointers = [
+            "/spec/selector",
+          ]
+        },
+      ]
       syncPolicy = {
         automated = {
           prune    = true
