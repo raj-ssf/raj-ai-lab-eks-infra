@@ -70,6 +70,12 @@ locals {
     "ghcr.io/dexidp/dex*",         # ArgoCD's bundled Dex IdP
     "public.ecr.aws/*",            # AWS public ECR (mirrors + EKS + official images)
 
+    # HuggingFace text-embeddings-inference (TEI) — used by
+    # vllm-bge-reranker for cross-encoder reranking. Pulled from
+    # GHCR (HuggingFace's official registry). Same trust-by-registry
+    # model as the vLLM upstream image: official HF org, pinned tag.
+    "ghcr.io/huggingface/text-embeddings-inference*",
+
     # vLLM serving stack (llm namespace). Pre-flight 2026-04-23: neither
     # docker.io/vllm/vllm-openai nor amazon/aws-cli publish cosign
     # signatures on Docker Hub. Trust here is registry-level:
