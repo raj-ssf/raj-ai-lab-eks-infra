@@ -9,9 +9,19 @@ module "eks" {
   subnet_ids                               = data.aws_subnets.private.ids
   enable_cluster_creator_admin_permissions = true
 
-  # IRSA OIDC provider is unused since the Pod Identity migration (all 5
-  # workloads now use aws_eks_pod_identity_association). Disabling removes
-  # the orphaned aws_iam_openid_connect_provider and keeps IAM clean.
+  # IRSA OIDC provider unused since the Pod Identity migration — every
+  # workload that needs AWS API access goes through
+  # aws_eks_pod_identity_association (current count is in the
+  # double digits across model-weights.tf, eval.tf, langgraph.tf,
+  # ingestion-service.tf, chat-ui.tf, training.tf, plus the platform
+  # bindings for karpenter/ALB/cert-manager/external-dns/EBS CSI/etc.;
+  # see `aws eks list-pod-identity-associations` for the live list).
+  # Disabling enable_irsa removes the orphaned
+  # aws_iam_openid_connect_provider and keeps IAM clean. The one
+  # leftover IRSA artifact — the eks.amazonaws.com/role-arn annotation
+  # on kube-system/ebs-csi-controller-sa — is documented in the
+  # aws-ebs-csi-driver block below (kept due to an SCP that blocks
+  # UpdateAddon when removing service_account_role_arn).
   enable_irsa = false
 
   # Module's default node SG only opens 1025-65535/tcp between nodes, which
