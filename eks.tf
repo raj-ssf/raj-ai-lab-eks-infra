@@ -2,11 +2,11 @@ module "eks" {
   source  = "terraform-aws-modules/eks/aws"
   version = "~> 20.24"
 
-  cluster_name    = var.cluster_name
-  cluster_version = var.cluster_version
-  cluster_endpoint_public_access = true
-  vpc_id     = var.vpc_id
-  subnet_ids = data.aws_subnets.private.ids
+  cluster_name                             = var.cluster_name
+  cluster_version                          = var.cluster_version
+  cluster_endpoint_public_access           = true
+  vpc_id                                   = var.vpc_id
+  subnet_ids                               = data.aws_subnets.private.ids
   enable_cluster_creator_admin_permissions = true
 
   # IRSA OIDC provider is unused since the Pod Identity migration (all 5
@@ -55,7 +55,7 @@ module "eks" {
   }
 
   cluster_addons = {
-    coredns                = {
+    coredns = {
       most_recent                 = true
       resolve_conflicts_on_update = "OVERWRITE"
       # Rewrite keycloak.<domain> to the in-cluster Istio Gateway Service.
@@ -93,11 +93,11 @@ module "eks" {
         EOT
       })
     }
-    kube-proxy             = {
+    kube-proxy = {
       most_recent                 = true
       resolve_conflicts_on_update = "OVERWRITE"
     }
-    vpc-cni                = {
+    vpc-cni = {
       most_recent                 = true
       resolve_conflicts_on_update = "OVERWRITE"
     }
@@ -105,14 +105,27 @@ module "eks" {
       most_recent                 = true
       resolve_conflicts_on_update = "OVERWRITE"
     }
-    aws-ebs-csi-driver     = {
+    aws-ebs-csi-driver = {
       most_recent = true
-      # Addon keeps service_account_role_arn pointing at the same role name
-      # as before — the underlying role was rebuilt with a Pod Identity trust
-      # policy, so the IRSA path is now a no-op. Real creds come from
-      # aws_eks_pod_identity_association.ebs_csi (see iam-ebs-csi.tf), which
-      # the AWS SDK picks up first in the credential chain.
-      service_account_role_arn = aws_iam_role.ebs_csi.arn
+      # Pod Identity exclusively. The role + binding live in
+      # iam-ebs-csi.tf:
+      #   aws_iam_role.ebs_csi (trust = pod_identity_trust)
+      #   aws_eks_pod_identity_association.ebs_csi (kube-system /
+      #     ebs-csi-controller-sa → role)
+      #
+      # Previously this block also set service_account_role_arn so the
+      # EKS add-on would annotate the SA with eks.amazonaws.com/role-arn
+      # for IRSA. The role's trust policy was already Pod-Identity-only
+      # (rebuilt during a prior IRSA→Pod-Identity migration), making
+      # the IRSA path a no-op — the annotation was zombie metadata that
+      # never resolved. Removed 2026-04-29 to align with the lab's
+      # Pod-Identity-exclusive policy across all 14 service workloads.
+      #
+      # After `terraform apply` of this change, the live SA may keep
+      # the leftover annotation (EKS add-ons don't proactively clean up
+      # annotations they previously set). One-shot strip:
+      #   kubectl -n kube-system annotate sa ebs-csi-controller-sa \
+      #     eks.amazonaws.com/role-arn-
     }
   }
 
@@ -136,9 +149,9 @@ module "eks" {
         xvda = {
           device_name = "/dev/xvda"
           ebs = {
-            volume_size = 50
-            volume_type = "gp3"
-            encrypted   = true
+            volume_size           = 50
+            volume_type           = "gp3"
+            encrypted             = true
             delete_on_termination = true
           }
         }
