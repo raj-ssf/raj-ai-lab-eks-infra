@@ -90,6 +90,80 @@ resource "kubectl_manifest" "ai_lab_alerts" {
           ]
         },
         # -------------------------------------------------------------
+        # Phase #37: argo-rollouts state alerts
+        # -------------------------------------------------------------
+        # Closes a gap left by Phases #28-36: today nothing pages if
+        # a canary stalls overnight (operator missed a manual promote)
+        # or if AnalysisRuns trend toward failure between gated
+        # checkpoints. These three alerts watch the controller's own
+        # operational metrics (exposed via Phase #28's metrics ServiceMonitor).
+        #
+        # Metric source: argo-rollouts controller's /metrics endpoint
+        # (Phase #28 enabled the ServiceMonitor). Series we use:
+        #   rollout_info{name=,namespace=,phase=}    1 = current phase
+        #   rollout_phase                            current phase as label
+        #   analysis_run_info{phase=,...}            1 = current AR phase
+        # Grafana sidecar picks up the metrics; PromQL queries below
+        # don't need any additional scrape config.
+        {
+          name     = "argo-rollouts.rules"
+          interval = "30s"
+          rules = [
+            {
+              alert = "RolloutPausedTooLong"
+              # Any Rollout in Paused phase for >30m. Catches the
+              # case where a canary hits a manual approval / pause
+              # step and the operator forgets to come back.
+              # Ignores Rollouts whose canary spec doesn't include
+              # any indefinite-pause steps (lab's all use timed
+              # pauses, but harmless if added later).
+              expr = "max by (name, namespace) (rollout_info{phase=\"Paused\"}) == 1"
+              for  = "30m"
+              labels = {
+                severity = "warning"
+                service  = "argo-rollouts"
+              }
+              annotations = {
+                summary     = "Rollout {{ $labels.namespace }}/{{ $labels.name }} paused >30m"
+                description = "An Argo Rollouts canary has been in Paused phase for over 30 minutes. Either an operator forgot to promote a manual-pause step, or a timed pause step is misconfigured with an excessive duration. Check via: kubectl argo rollouts get rollout {{ $labels.name }} -n {{ $labels.namespace }}. Promote with: kubectl argo rollouts promote {{ $labels.name }} -n {{ $labels.namespace }}."
+              }
+            },
+            {
+              alert = "RolloutDegraded"
+              # Phase=Degraded means the canary aborted (analysis
+              # failed, or the stable+canary pods can't reach
+              # quorum). Don't wait — this is critical.
+              expr = "max by (name, namespace) (rollout_info{phase=\"Degraded\"}) == 1"
+              for  = "5m"
+              labels = {
+                severity = "critical"
+                service  = "argo-rollouts"
+              }
+              annotations = {
+                summary     = "Rollout {{ $labels.namespace }}/{{ $labels.name }} degraded"
+                description = "An Argo Rollouts canary entered Degraded phase — usually means analysis failed or the canary RS can't reach Ready. Inspect via: kubectl argo rollouts get rollout {{ $labels.name }} -n {{ $labels.namespace }}. To revert: kubectl argo rollouts undo {{ $labels.name }} -n {{ $labels.namespace }}. To inspect AnalysisRun verdicts: kubectl argo rollouts list analysisruns -n {{ $labels.namespace }}."
+              }
+            },
+            {
+              alert = "RolloutAnalysisRunFailed"
+              # Any AnalysisRun reaching Failed phase. Faster
+              # signal than RolloutDegraded — fires the moment an
+              # AnalysisRun fails, before argo-rollouts has
+              # transitioned the rollout to Degraded.
+              expr = "max by (name, namespace) (analysis_run_info{phase=\"Failed\"}) == 1"
+              for  = "1m"
+              labels = {
+                severity = "critical"
+                service  = "argo-rollouts"
+              }
+              annotations = {
+                summary     = "AnalysisRun {{ $labels.namespace }}/{{ $labels.name }} failed"
+                description = "An argo-rollouts AnalysisRun reported phase=Failed — the canary will abort imminently. Inspect the failure reason via: kubectl argo rollouts get analysisrun {{ $labels.name }} -n {{ $labels.namespace }}. Most common causes: success/failure threshold tripped on the metric query; Prometheus connection error; PromQL syntax error on the query."
+              }
+            },
+          ]
+        },
+        # -------------------------------------------------------------
         # langgraph-service alerts
         # -------------------------------------------------------------
         {
