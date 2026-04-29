@@ -1,0 +1,209 @@
+{
+  "uid": "rag-service-overview",
+  "title": "rag-service overview",
+  "tags": ["rag-service", "ai-lab", "rag"],
+  "timezone": "browser",
+  "schemaVersion": 38,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-1h", "to": "now" },
+  "templating": {
+    "list": []
+  },
+  "annotations": { "list": [] },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "/retrieve request rate",
+      "description": "Per-second rate of /retrieve calls served. Spikes correlate with chat-ui usage; sustained zero with cluster traffic suggests Istio AuthZ rejecting upstream callers (check the langgraph_requests_total panel against this one).",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 10 }
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(rag_retrieve_total[5m]))",
+          "legendFormat": "retrieve",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(rate(rag_ingest_total[5m]))",
+          "legendFormat": "ingest",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "/retrieve end-to-end latency",
+      "description": "P50/P95/P99 of total /retrieve duration (embed + Qdrant hybrid + rerank + serialize). Cold-start scale-from-zero on the GPU node group lights up the P99 first; sustained P95 climb usually means bge-reranker or vllm-bge-m3 is under-provisioned.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 5 }
+        }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(rag_retrieve_duration_seconds_bucket[5m])))",
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(rag_retrieve_duration_seconds_bucket[5m])))",
+          "legendFormat": "p95",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(rag_retrieve_duration_seconds_bucket[5m])))",
+          "legendFormat": "p99",
+          "refId": "C"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Per-stage P95 latency",
+      "description": "Breakdown of where /retrieve spends time: embed (vllm-bge-m3 + in-process BM25), Qdrant hybrid query (RRF fusion server-side), and TEI cross-encoder rerank. Sums won't match the E2E panel exactly (chunk serialization is uncounted) but they should be close. A stage P95 nearing the per-stage bucket cap (2.5s) means investigate that specific upstream.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 5 }
+        }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(rag_embed_duration_seconds_bucket[5m])))",
+          "legendFormat": "embed (dense+sparse)",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(rag_qdrant_duration_seconds_bucket[5m])))",
+          "legendFormat": "qdrant hybrid",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(rag_rerank_duration_seconds_bucket[5m])))",
+          "legendFormat": "rerank (TEI)",
+          "refId": "C"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Reranker fail-open rate",
+      "description": "Fraction of /retrieve calls where rerank_chunks fell back to dense ordering (RERANKER_URL unset, TEI 5xx, or timeout). Should sit at 0 in a healthy lab. Non-zero values silently degrade retrieval quality without erroring loudly — this is the canary that catches a sick bge-reranker before users notice. Phase #25 alert candidate: pageable when this exceeds 5% sustained over 10m.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 20 }
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(rag_reranker_used_total{used=\"false\"}[5m])) / clamp_min(sum(rate(rag_reranker_used_total[5m])), 1e-9)",
+          "legendFormat": "fail-open rate",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Chunks returned (P50 / P95)",
+      "description": "Distribution of how many chunks /retrieve actually surfaced per call. P95 hugging the requested top_k means retrieval is finding plenty; P95 dropping below top_k indicates either the user's session_id has sparse uploads or the RRF fusion is filtering too aggressively. Zero values show up here when a session is empty — common during fresh chats.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 10 }
+        }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(rag_chunks_returned_bucket[5m])))",
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(rag_chunks_returned_bucket[5m])))",
+          "legendFormat": "p95",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "stat",
+      "title": "/retrieve P95",
+      "description": "Snapshot of end-to-end /retrieve P95 over the last 5m. Thresholds tuned to the lab's GPU-warm baseline: ≤1s healthy, 1-2.5s degraded (likely cold rerank), >2.5s investigate (probably scaled-from-zero or oversubscribed).",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 6, "x": 12, "y": 16 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 1 },
+              { "color": "red", "value": 2.5 }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(rag_retrieve_duration_seconds_bucket[5m])))",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "colorMode": "value",
+        "graphMode": "area"
+      }
+    },
+    {
+      "id": 7,
+      "type": "stat",
+      "title": "/ingest chunks P95",
+      "description": "Chunks-per-/ingest at P95. Useful for capacity planning — multiply by the embed_batch concurrency cap (RAG_EMBED_CONCURRENCY=8) to estimate Bedrock embedding QPS at peak ingest. Climbing P95 = users uploading larger documents; could justify bumping the chunk-size default.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 6, "x": 18, "y": 16 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(rag_ingest_chunks_bucket[5m])))",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "colorMode": "value",
+        "graphMode": "area"
+      }
+    }
+  ]
+}
