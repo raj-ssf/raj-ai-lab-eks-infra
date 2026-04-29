@@ -56,10 +56,10 @@ resource "kubectl_manifest" "hello_app" {
   })
 
   depends_on = [
-      helm_release.argocd,
-      kubernetes_secret.argocd_app_repo,
-    ]
-  }
+    helm_release.argocd,
+    kubernetes_secret.argocd_app_repo,
+  ]
+}
 
 resource "kubectl_manifest" "rag_service_app" {
   yaml_body = yamlencode({
@@ -275,6 +275,18 @@ resource "kubectl_manifest" "vllm_app" {
           group        = "apps"
           kind         = "Deployment"
           name         = "vllm-bge-reranker"
+          namespace    = "llm"
+          jsonPointers = ["/spec/replicas"]
+        },
+        {
+          # llama-guard-3-8b (Phase #4 content safety classifier).
+          # Same scale-to-zero default; operator scales up before a
+          # session that needs the safety filter active. Caught in the
+          # 2026-04-29 Phase #4 activation smoke — without this entry
+          # ArgoCD selfHeal reverts the manual scale-up mid-cold-start.
+          group        = "apps"
+          kind         = "Deployment"
+          name         = "vllm-llama-guard-3-8b"
           namespace    = "llm"
           jsonPointers = ["/spec/replicas"]
         },
