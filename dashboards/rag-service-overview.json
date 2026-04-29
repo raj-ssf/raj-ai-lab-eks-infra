@@ -204,6 +204,41 @@
         "colorMode": "value",
         "graphMode": "area"
       }
+    },
+    {
+      "id": 8,
+      "type": "stat",
+      "title": "rag-service alerts firing",
+      "description": "Phase #26 PrometheusRule alerts in 'firing' state (past their for: window) scoped to service=rag-service. 'None firing' = healthy. Alertmanager is disabled in the lab so this panel is the operator's at-a-glance signal — cross-reference firing alert names against the runbook annotations on each rule (see monitoring-alerts.tf).",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 24 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "None firing",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "ALERTS{service=\"rag-service\", alertstate=\"firing\"}",
+          "legendFormat": "{{alertname}} ({{severity}})",
+          "refId": "A",
+          "instant": true
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "" },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value_and_name"
+      }
     }
   ]
 }
