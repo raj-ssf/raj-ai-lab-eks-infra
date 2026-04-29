@@ -48,14 +48,24 @@ locals {
     # vllm-llama-8b Service it evaluates).
     "${aws_ecr_repository.eval.repository_url}*",
 
+    # ragas-eval image (Phase #3 RAG-pipeline regression gate). Sibling of
+    # `eval` — separate ECR repo because the two evaluation stacks have
+    # incompatible Python deps (lm-eval 0.4.7 vs ragas 0.2 + langchain 0.3).
+    # Same GHA + cosign signing pattern. Pulled by ragas-eval Jobs in the
+    # `llm` namespace via .github/workflows/ragas-eval.yml. Caught in the
+    # 2026-04-29 first real workflow run after `terraform apply` of
+    # ragas-eval.tf — Kyverno admission denied the Job because this entry
+    # was missing.
+    "${aws_ecr_repository.ragas_eval.repository_url}*",
+
     # Signed by argoproj/argo-cd releases (verify-argocd-image-signatures)
     "quay.io/argoproj/argocd*",
     "quay.io/argoproj/argocd-applicationset*",
 
     # Trusted unsigned publishers
-    "docker.io/istio/*",           # Istio mesh sidecars + control plane
-    "docker.io/bitnami/*",         # Bitnami charts (post-rename: see bitnamilegacy)
-    "docker.io/bitnamilegacy/*",   # Bitnami charts on current version (Broadcom rename)
+    "docker.io/istio/*",         # Istio mesh sidecars + control plane
+    "docker.io/bitnami/*",       # Bitnami charts (post-rename: see bitnamilegacy)
+    "docker.io/bitnamilegacy/*", # Bitnami charts on current version (Broadcom rename)
     # Vault agent injector sidecar + server. Permanent allowlist entry, not
     # a stopgap: confirmed 2026-04-23 via `cosign verify` with fully permissive
     # identity+issuer regex that docker.io/hashicorp/vault:1.18.x ships NO
@@ -66,9 +76,9 @@ locals {
     # via our Helm values), not Sigstore-level. Revisit if HashiCorp ever
     # starts signing their Docker Hub image tags.
     "hashicorp/vault*",
-    "qdrant/qdrant*",              # Qdrant vector DB
-    "ghcr.io/dexidp/dex*",         # ArgoCD's bundled Dex IdP
-    "public.ecr.aws/*",            # AWS public ECR (mirrors + EKS + official images)
+    "qdrant/qdrant*",      # Qdrant vector DB
+    "ghcr.io/dexidp/dex*", # ArgoCD's bundled Dex IdP
+    "public.ecr.aws/*",    # AWS public ECR (mirrors + EKS + official images)
 
     # HuggingFace text-embeddings-inference (TEI) — used by
     # vllm-bge-reranker for cross-encoder reranking. Pulled from
