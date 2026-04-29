@@ -258,10 +258,17 @@ resource "kubectl_manifest" "karpenter_nodepool_gpu_experiments" {
               key      = "node.kubernetes.io/instance-type"
               operator = "In"
               values = [
-                # 4-GPU perf-floor baseline — AWQ marlin kernel may
-                # fall back to the triton path on Turing (no INT4
-                # tensor cores). Interesting data-point either way.
-                "g4dn.12xlarge",   # 4× T4 16GB (Turing)
+                # T4 / Turing (sm_75) was previously in this allowlist as
+                # a perf-floor baseline. Removed 2026-04-28 after fine-
+                # tuning F2: T4 doesn't support flash-attention 2 (Ampere+
+                # only), and without flash-attn an 8B QLoRA training step
+                # at sequence_len=2048 took ~5 min/step → ~26 hours per
+                # epoch on g4dn.12xlarge. The cheapest L4-based instance
+                # (g6.xlarge, $0.80/hr) is BOTH faster per step AND
+                # cheaper per hour, so g4dn no longer earns a spot here.
+                # Inference workloads (vllm AWQ marlin) preferred the
+                # Ampere+ GPUs anyway — keeping T4 only inflated the
+                # consideration set without offering value.
                 # 1× L4 24GB (Ada) — cheapest GPU in the allowlist.
                 # Used by vllm-bge-m3 (~5 GB working set fits in 24 GB
                 # comfortably). NOT suitable for 70B AWQ — quantized 70B

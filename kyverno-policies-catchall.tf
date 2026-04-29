@@ -42,6 +42,12 @@ locals {
     # because it's verified by the same supply-chain pattern.
     "${aws_ecr_repository.training.repository_url}*",
 
+    # Eval image (F4) — lm-evaluation-harness + langfuse SDK + AWS tools.
+    # Same GHA + cosign signing pattern. Pulled by eval Jobs in the
+    # `llm` namespace (eval Job lives there to colocate with the
+    # vllm-llama-8b Service it evaluates).
+    "${aws_ecr_repository.eval.repository_url}*",
+
     # Signed by argoproj/argo-cd releases (verify-argocd-image-signatures)
     "quay.io/argoproj/argocd*",
     "quay.io/argoproj/argocd-applicationset*",
@@ -63,6 +69,12 @@ locals {
     "qdrant/qdrant*",              # Qdrant vector DB
     "ghcr.io/dexidp/dex*",         # ArgoCD's bundled Dex IdP
     "public.ecr.aws/*",            # AWS public ECR (mirrors + EKS + official images)
+
+    # HuggingFace text-embeddings-inference (TEI) — used by
+    # vllm-bge-reranker for cross-encoder reranking. Pulled from
+    # GHCR (HuggingFace's official registry). Same trust-by-registry
+    # model as the vLLM upstream image: official HF org, pinned tag.
+    "ghcr.io/huggingface/text-embeddings-inference*",
 
     # vLLM serving stack (llm namespace). Pre-flight 2026-04-23: neither
     # docker.io/vllm/vllm-openai nor amazon/aws-cli publish cosign

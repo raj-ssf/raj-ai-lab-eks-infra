@@ -47,105 +47,22 @@
 #     metadata that bypasses mTLS.
 
 # =============================================================================
-# DestinationRule: force ISTIO_MUTUAL TLS on the four ingress-fronted
-# Services.
-#
-# Why this exists: Istio's auto-mTLS inference is asymmetric for
-# regular ClusterIP Services that use named targetPorts (e.g.,
-# `targetPort: http`). The headless variant of each Service gets
-# auto-mTLS configured cleanly (its EDS endpoints carry the in-mesh
-# metadata directly), but the ClusterIP variant ends up with no
-# `transport_socket` on its outbound cluster — meaning the source
-# Envoy connects in plaintext, which arrives at the destination
-# sidecar with no SPIFFE identity, which fails to match any
-# principal-based ALLOW rule. Result: 403 RBAC: access denied.
-#
-# Diagnosed 2026-04-25 on this cluster:
-#   outbound|80||keycloak.keycloak.svc.cluster.local           transport_socket: <none>
-#   outbound|8080||keycloak-headless.keycloak.svc.cluster.local transport_socket: TLS (Istio mutual)
-# Same asymmetry on the postgres pair, and on argocd-server,
-# rag-service, langfuse-web (all ClusterIP variants).
-#
-# Forcing tls.mode=ISTIO_MUTUAL via DestinationRule overrides the
-# auto-mTLS quirk and makes the source Envoy initiate mTLS
-# regardless. Once mTLS engages, the source's SPIFFE principal
-# arrives at the destination sidecar and the allow-ingress-nginx
-# rules below match correctly.
-#
-# Scope: only the four Services that NGINX ingresses reference.
-# Other in-cluster Services (intra-langfuse, intra-argocd) work
-# fine because they go pod-to-pod via headless Services or ports
-# that auto-mTLS handles correctly.
+# Removed 2026-04-28 (post-Gateway-API cleanup):
+#   * kubectl_manifest.ingress_nginx_no_mtls (Phase 12b) — DestinationRule
+#     that disabled mTLS for in-cluster pods → ingress-nginx Service.
+#     Obsolete once ingress-nginx was uninstalled and the CoreDNS rewrite
+#     to its ClusterIP was removed.
+#   * kubectl_manifest.force_mtls (F4 cleanup) — DestinationRules forcing
+#     ISTIO_MUTUAL on argocd-server, rag-service, chat-ui Services.
+#     Originally workarounds for Istio's auto-mTLS asymmetry on regular
+#     ClusterIP Services with named targetPorts (the named-port form
+#     emitted no transport_socket on the outbound cluster, so source
+#     Envoys connected in plaintext and matched no principal-based ALLOW).
+#     They unblocked north-south traffic from ingress-nginx → meshed
+#     backends. With ingress-nginx replaced by gateway-system's Istio
+#     Gateway, the gateway's Envoy is meshed natively and connects with
+#     proper SPIFFE identity to backends without any DR override.
 # =============================================================================
-
-locals {
-  # Map of ingress-fronted Services that need explicit ISTIO_MUTUAL
-  # TLS forcing. Format: key = display name, value = (namespace, service-name).
-  # The DestinationRule's `host` is constructed as
-  # `<service>.<namespace>.svc.cluster.local` (Istio's canonical FQDN).
-  #
-  # Inclusion criterion: the destination Service's pods MUST be meshed
-  # (have an istio-proxy sidecar). Forcing ISTIO_MUTUAL to an unmeshed
-  # destination produces "TLS_error: WRONG_VERSION_NUMBER" because the
-  # destination has no sidecar to terminate mTLS — Envoy returns 503 to
-  # both internal callers AND the ingress-nginx hop.
-  #
-  # langfuse-web is intentionally absent: the langfuse Helm chart's pods
-  # are unmeshed (the langfuse namespace has no istio-injection label,
-  # because mTLS-wrapping its Postgres/ClickHouse/Redis traffic would
-  # break those non-HTTP protocols). Add langfuse-web back here only if
-  # the langfuse namespace is later mesh-injected.
-  force_mtls_targets = {
-    argocd-server = { namespace = "argocd",   service = "argocd-server" }
-    # keycloak removed 2026-04-28 — same rationale as langfuse-web's
-    # earlier removal: keycloak's pod has no istio-proxy sidecar (the
-    # istio-injection label on keycloak ns is unstable due to ArgoCD
-    # stripping it; new pods rolled by helm upgrades land without a
-    # sidecar). force-mtls on an unmeshed destination causes
-    # TLS_error: WRONG_VERSION_NUMBER → 503 from the gateway. After
-    # Phase 12b removes ingress-nginx, ALL the remaining force-mtls
-    # entries here become obsolete (they were workarounds for NGINX's
-    # auto-mTLS detection asymmetry, not needed for the meshed
-    # gateway-system Envoy). Cleanup deferred to a follow-up.
-    rag-service   = { namespace = "rag",      service = "rag-service" }
-    chat-ui       = { namespace = "chat",     service = "chat-ui" }
-  }
-}
-
-resource "kubectl_manifest" "force_mtls" {
-  for_each = local.force_mtls_targets
-
-  yaml_body = yamlencode({
-    apiVersion = "networking.istio.io/v1"
-    kind       = "DestinationRule"
-    metadata = {
-      name      = "force-mtls-${each.key}"
-      namespace = each.value.namespace
-    }
-    spec = {
-      host = "${each.value.service}.${each.value.namespace}.svc.cluster.local"
-      trafficPolicy = {
-        tls = {
-          # ISTIO_MUTUAL: source Envoy initiates mTLS using the
-          # workload's SPIFFE cert. Destination Envoy validates and
-          # extracts the source principal for AuthorizationPolicy.
-          mode = "ISTIO_MUTUAL"
-        }
-      }
-    }
-  })
-
-  depends_on = [
-    helm_release.istiod,
-  ]
-}
-
-# (Removed 2026-04-28, Phase 12b cleanup: kubectl_manifest.ingress_nginx_no_mtls
-#  DestinationRule. It disabled mTLS for in-cluster source pods → ingress-nginx
-#  Service traffic, working around an Istio auto-mTLS conflict with the
-#  CoreDNS rewrite that mapped keycloak.ekstest.com → ingress-nginx ClusterIP.
-#  Now that ingress-nginx is uninstalled, the CoreDNS rewrite is gone too,
-#  and there's no in-cluster path to ingress-nginx to mTLS-disable.)
 
 # =============================================================================
 # Cluster-wide deny-all in the mesh root namespace.
@@ -180,83 +97,30 @@ resource "kubectl_manifest" "deny_all_mesh_wide" {
     }
   })
 
-  # Ordering rationale: ingress-nginx Helm release picks up the new
-  # podLabels (sidecar.istio.io/inject=true), rolls its pods
-  # (deploys sidecared replacements), DestinationRules force mTLS
-  # on the ingress-fronted backends, THEN deny-all activates. If we
-  # applied deny-all first, the still-unmeshed ingress-nginx pods
-  # (or the still-plaintext outbound clusters) would have no SPIFFE
-  # identity reaching the backend sidecars, and the allow-ingress-nginx
-  # rules below wouldn't match — briefly breaking north-south traffic.
+  # Ordering rationale (post-Gateway-API): istiod must be installed
+  # so the AuthorizationPolicy CRD exists. Pre-Gateway-API there was
+  # also a force_mtls dependency (DestinationRules had to land before
+  # deny-all activated to keep ingress-nginx → backend traffic alive
+  # during the bring-up); that dependency is gone now that ingress-
+  # nginx is decommissioned and the gateway-system Envoy connects to
+  # backends with proper auto-mTLS.
   depends_on = [
     helm_release.istiod,
-    kubectl_manifest.force_mtls,
   ]
 }
 
 # =============================================================================
-# Per-namespace ALLOW: ingress-nginx → anything in this namespace.
-#
-# Now that ingress-nginx runs with an Istio sidecar
-# (nginx-ingress.tf controller.podAnnotations enables injection), all
-# its outbound calls to backend pods initiate mTLS using its SPIFFE ID
-# `cluster.local/ns/ingress-nginx/sa/ingress-nginx`. These four
-# policies allow that ID into the four namespaces fronted by
-# Ingress resources (rag.ekstest.com → rag, keycloak.ekstest.com →
-# keycloak, argocd.ekstest.com → argocd, langfuse.ekstest.com →
-# langfuse).
-#
-# Scope is intentionally ns-wide (no `selector`): there's only one
-# ingress target per ns today (rag-service, keycloak, argocd-server,
-# langfuse-web), so the broader scope is harmless and survives the
-# future addition of secondary ingress targets without a policy edit.
+# Removed 2026-04-28 (post-Gateway-API cleanup):
+#   * kubectl_manifest.allow_ingress_nginx — six per-namespace
+#     AuthorizationPolicies admitting `cluster.local/ns/ingress-nginx/
+#     sa/ingress-nginx` into argocd / keycloak / rag / langfuse /
+#     langgraph / chat. Scoped to that one principal so only the
+#     ingress controller could fan out. Obsolete now that ingress-
+#     nginx is uninstalled and `gateway-system`'s Istio Gateway is
+#     the only north-south entry point. The gateway-system principal
+#     is admitted via the existing allow-public-ingress
+#     AuthorizationPolicy (gateway-system.tf module) per-app.
 # =============================================================================
-
-locals {
-  # Namespaces where ingress-nginx terminates ingress traffic and
-  # forwards to a meshed backend. argocd / keycloak / rag / langfuse
-  # are all istio-injection=enabled per locals in istio.tf.
-  ingress_nginx_fronted_namespaces = toset([
-    "argocd",
-    "keycloak",
-    "rag",
-    "langfuse",
-    "langgraph",
-    "chat",
-  ])
-}
-
-resource "kubectl_manifest" "allow_ingress_nginx" {
-  for_each = local.ingress_nginx_fronted_namespaces
-
-  yaml_body = yamlencode({
-    apiVersion = "security.istio.io/v1"
-    kind       = "AuthorizationPolicy"
-    metadata = {
-      name      = "allow-ingress-nginx"
-      namespace = each.value
-    }
-    spec = {
-      action = "ALLOW"
-      rules = [
-        {
-          from = [{
-            source = {
-              principals = [
-                "cluster.local/ns/ingress-nginx/sa/ingress-nginx",
-              ]
-            }
-          }]
-        },
-      ]
-    }
-  })
-
-  depends_on = [
-    helm_release.istiod,
-    kubectl_manifest.deny_all_mesh_wide,
-  ]
-}
 
 # =============================================================================
 # Per-namespace ALLOW: intra-namespace east-west traffic.
@@ -472,6 +336,82 @@ resource "kubectl_manifest" "allow_langgraph_to_rag" {
             operation = {
               methods = ["POST"]
               paths   = ["/retrieve"]
+            }
+          }]
+        },
+      ]
+    }
+  })
+
+  depends_on = [
+    helm_release.istiod,
+    kubectl_manifest.deny_all_mesh_wide,
+  ]
+}
+
+# Fine-tuning F4: eval-pod (in the llm namespace) needs to call the
+# vllm-llama-8b Service to compare base vs LoRA-merged inference. The
+# mesh-wide deny-all blocks even same-namespace traffic unless an ALLOW
+# policy admits the source principal — without this, the eval Job's
+# requests get 403 'RBAC: access denied' from Istio at the vLLM
+# sidecar's RBAC filter (verified the failure mode in run 4).
+#
+# Same shape as allow-rag-service / allow-langgraph-service / etc.
+# Scoped to a single SA principal so that future llm-namespace
+# workloads have to be allowlisted explicitly.
+resource "kubectl_manifest" "allow_eval_to_llm" {
+  yaml_body = yamlencode({
+    apiVersion = "security.istio.io/v1"
+    kind       = "AuthorizationPolicy"
+    metadata = {
+      name      = "allow-eval-pod"
+      namespace = "llm"
+    }
+    spec = {
+      action = "ALLOW"
+      rules = [
+        {
+          from = [{
+            source = {
+              principals = [
+                "cluster.local/ns/llm/sa/eval-pod",
+              ]
+            }
+          }]
+        },
+      ]
+    }
+  })
+
+  depends_on = [
+    helm_release.istiod,
+    kubectl_manifest.deny_all_mesh_wide,
+  ]
+}
+
+# Eval (optional) emits a Langfuse trace summarizing each run. Same
+# cross-namespace pattern as allow_langgraph_to_langfuse — the
+# langfuse namespace's mesh-wide deny-all blocks the eval pod's
+# trace POST without this rule. Scoped to the eval-pod SA only.
+# The eval Job no-ops Langfuse if LANGFUSE_PUBLIC_KEY env is unset,
+# so this rule is harmless even before the user creates the Secret.
+resource "kubectl_manifest" "allow_eval_to_langfuse" {
+  yaml_body = yamlencode({
+    apiVersion = "security.istio.io/v1"
+    kind       = "AuthorizationPolicy"
+    metadata = {
+      name      = "allow-eval-pod"
+      namespace = "langfuse"
+    }
+    spec = {
+      action = "ALLOW"
+      rules = [
+        {
+          from = [{
+            source = {
+              principals = [
+                "cluster.local/ns/llm/sa/eval-pod",
+              ]
             }
           }]
         },

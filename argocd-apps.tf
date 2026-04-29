@@ -15,6 +15,28 @@ resource "kubectl_manifest" "hello_app" {
         repoURL        = var.argocd_app_repo_url
         targetRevision = "HEAD"
         path           = "hello"
+        # Phase 2 portability refactor: hello's HTTPRoute now uses
+        # placeholder hostnames (hello.example.local / hello2.example.local)
+        # in the apps repo. Patches inject the real var.domain hostnames
+        # at sync time — same pattern as rag-service / chat-ui / etc.
+        kustomize = {
+          patches = [
+            {
+              target = {
+                kind = "HTTPRoute"
+                name = "hello"
+              }
+              patch = <<-EOT
+                - op: replace
+                  path: /spec/hostnames/0
+                  value: hello.${var.domain}
+                - op: replace
+                  path: /spec/hostnames/1
+                  value: hello2.${var.domain}
+              EOT
+            },
+          ]
+        }
       }
       destination = {
         server    = "https://kubernetes.default.svc"
@@ -244,6 +266,15 @@ resource "kubectl_manifest" "vllm_app" {
           group        = "apps"
           kind         = "Deployment"
           name         = "vllm-bge-m3"
+          namespace    = "llm"
+          jsonPointers = ["/spec/replicas"]
+        },
+        {
+          # bge-reranker (TEI cross-encoder, RAG completeness phase).
+          # Same scale-to-zero default + manual spin-up pattern.
+          group        = "apps"
+          kind         = "Deployment"
+          name         = "vllm-bge-reranker"
           namespace    = "llm"
           jsonPointers = ["/spec/replicas"]
         },
