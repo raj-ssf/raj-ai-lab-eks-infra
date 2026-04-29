@@ -1,0 +1,196 @@
+{
+  "uid": "langgraph-service-overview",
+  "title": "langgraph-service overview",
+  "tags": ["langgraph", "ai-lab", "rag"],
+  "timezone": "browser",
+  "schemaVersion": 38,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-1h", "to": "now" },
+  "templating": {
+    "list": []
+  },
+  "annotations": { "list": [] },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Request rate by tier",
+      "description": "Rate of /invoke and /invoke/stream completions, sliced by routed-to model tier.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 10 }
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum by (route) (rate(langgraph_requests_total[5m]))",
+          "legendFormat": "{{route}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "P95 latency by node",
+      "description": "Per-node graph step duration, P95. Anomalies here pinpoint which node is slow without staring at every histogram individually.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 5 }
+        }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (node, le) (rate(langgraph_node_duration_seconds_bucket[5m])))",
+          "legendFormat": "{{node}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Cache hit rate",
+      "description": "Phase #7 semantic cache effectiveness. Hits avoid the entire downstream pipeline (classify, retrieve, execute, reflect, safety_output) — direct cost saving. 30-50% is typical for repetitive workloads.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 20 }
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(langgraph_cache_action_total{action=\"hit\"}[5m])) / clamp_min(sum(rate(langgraph_cache_action_total{action!=\"disabled\"}[5m])), 1e-9)",
+          "legendFormat": "hit rate",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Safety / hallucination / PII action rates",
+      "description": "Stacked: each filter's non-pass-through rate per second. Spikes in safety blocks indicate adversarial traffic; sustained hallucination flags suggest retrieval quality issues; PII redactions tell you when the model touched sensitive content in retrieved chunks.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": { "drawStyle": "bars", "fillOpacity": 80, "stacking": { "mode": "normal" } }
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(langgraph_safety_action_total{action=~\"blocked_input|blocked_output\"}[5m]))",
+          "legendFormat": "safety blocks",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(rate(langgraph_hallucination_action_total{verdict=~\"partial|ungrounded\"}[5m]))",
+          "legendFormat": "hallucination flags",
+          "refId": "B"
+        },
+        {
+          "expr": "sum(rate(langgraph_pii_redact_action_total{action=\"redacted\"}[5m]))",
+          "legendFormat": "PII redactions",
+          "refId": "C"
+        },
+        {
+          "expr": "sum(rate(langgraph_budget_action_total{action=\"exceeded\"}[5m]))",
+          "legendFormat": "budget exceeded",
+          "refId": "D"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Top tools used",
+      "description": "Tool invocation rate by tool name from the Phase T agentic execute loop. High calculator usage = many math questions; high search_session_docs = users referencing uploaded files; sudden http_fetch spikes deserve scrutiny (potential abuse vector).",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 16 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": { "drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 10 }
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum by (tool) (rate(langgraph_tool_calls_total[5m]))",
+          "legendFormat": "{{tool}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "stat",
+      "title": "Reasoning cycles P95",
+      "description": "Phase T2 graph-level reasoning loop depth. P95 close to 1 = single-pass typical; P95 climbing toward MAX_REASONING_CYCLES suggests reflection node consistently asks for more retrieval — investigate retrieval quality.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 6, "x": 12, "y": 16 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 2 },
+              { "color": "red", "value": 3 }
+            ]
+          }
+        }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(langgraph_reasoning_cycles_bucket[5m])))",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "colorMode": "value",
+        "graphMode": "area"
+      }
+    },
+    {
+      "id": 7,
+      "type": "stat",
+      "title": "Planner usage",
+      "description": "Fraction of requests where the Phase #13 planner emitted a plan. 0 = disabled or routing to non-planner tiers (trivial/tuned-lora). Climbing toward 1 = reasoning/hard tier traffic dominating + planner enabled.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 6, "x": 18, "y": 16 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1
+        }
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(langgraph_planner_action_total{action=\"planned\"}[5m])) / clamp_min(sum(rate(langgraph_planner_action_total[5m])), 1e-9)",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "colorMode": "value",
+        "graphMode": "area"
+      }
+    }
+  ]
+}
