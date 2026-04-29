@@ -424,3 +424,83 @@ resource "kubectl_manifest" "allow_eval_to_langfuse" {
     kubectl_manifest.deny_all_mesh_wide,
   ]
 }
+
+# Phase #3 RAGAS regression workflow: the ragas-eval Job (also runs
+# under the eval-pod SA in the llm namespace, sharing the SA since
+# both use the same Pod Identity binding for S3 writes) calls
+# ingestion-service to seed the eval session with golden documents,
+# then calls langgraph-service /invoke to run each question through
+# the full RAG pipeline. Mesh-wide deny-all blocks both cross-ns
+# calls without these ALLOW rules.
+#
+# Caught empirically 2026-04-29: first RAGAS workflow run after IAM/
+# EKS-access/Kyverno prereqs landed got 403 RBAC denied at
+# ingestion-service /upload. That's Istio's standard denial format
+# for AuthorizationPolicy-rejected calls.
+#
+# Same SA principal as F4's eval Job — adding these here rather than
+# splitting the eval-pod SA into two (one per workstream) because
+# F4 lm-eval and #3 RAGAS share the same trust posture (read S3
+# evals, write S3 results) and the IAM role they share already
+# scopes their AWS access. The Istio principal is just an identity
+# tag; one SA serving both eval flavors is fine.
+
+resource "kubectl_manifest" "allow_eval_to_ingestion" {
+  yaml_body = yamlencode({
+    apiVersion = "security.istio.io/v1"
+    kind       = "AuthorizationPolicy"
+    metadata = {
+      name      = "allow-eval-pod"
+      namespace = "ingestion"
+    }
+    spec = {
+      action = "ALLOW"
+      rules = [
+        {
+          from = [{
+            source = {
+              principals = [
+                "cluster.local/ns/llm/sa/eval-pod",
+              ]
+            }
+          }]
+        },
+      ]
+    }
+  })
+
+  depends_on = [
+    helm_release.istiod,
+    kubectl_manifest.deny_all_mesh_wide,
+  ]
+}
+
+resource "kubectl_manifest" "allow_eval_to_langgraph" {
+  yaml_body = yamlencode({
+    apiVersion = "security.istio.io/v1"
+    kind       = "AuthorizationPolicy"
+    metadata = {
+      name      = "allow-eval-pod"
+      namespace = "langgraph"
+    }
+    spec = {
+      action = "ALLOW"
+      rules = [
+        {
+          from = [{
+            source = {
+              principals = [
+                "cluster.local/ns/llm/sa/eval-pod",
+              ]
+            }
+          }]
+        },
+      ]
+    }
+  })
+
+  depends_on = [
+    helm_release.istiod,
+    kubectl_manifest.deny_all_mesh_wide,
+  ]
+}
