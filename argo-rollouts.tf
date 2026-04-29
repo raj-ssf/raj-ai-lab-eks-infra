@@ -155,3 +155,102 @@ resource "helm_release" "argo_rollouts" {
 # How to peek at the dashboard:
 #   kubectl -n argo-rollouts port-forward svc/argo-rollouts-dashboard 3100:3100
 #   open http://localhost:3100
+
+# =============================================================================
+# Phase #38: public HTTPRoute exposing the dashboard at rollouts.${var.domain}
+#
+# WARNING — SECURITY GAP:
+# The argo-rollouts dashboard has NO native per-user authentication.
+# Once this HTTPRoute is in place, anyone who knows the hostname can
+# READ all Rollout state across the cluster (canary phase, AnalysisRun
+# verdicts, image hashes, replica counts). The dashboard is read-only,
+# but operational state is itself sensitive.
+#
+# Today's mitigations:
+#   1. Hostname is not published anywhere outside this repo + tfvars,
+#      so discovery requires repo access.
+#   2. NLB is internet-facing but TLS-only; no path-level enumeration.
+#   3. Cluster RBAC still gates kubectl-level mutation; this surface
+#      is read-only, so an attacker who finds the URL can observe but
+#      not promote/abort/undo rollouts.
+#
+# Proper hardening — pick one or combine:
+#   A. oauth2-proxy in front: deploy oauth2-proxy as a sidecar or
+#      separate pod, point the HTTPRoute at it instead of the
+#      dashboard service. Same Keycloak realm, shared session cookie
+#      with grafana/argocd. ~1 day of work; the canonical pattern.
+#   B. Istio JWT validation: RequestAuthentication +
+#      AuthorizationPolicy requiring a Keycloak-signed token on the
+#      dashboard's argo-rollouts Service. Browser-hostile (no
+#      automatic redirect to Keycloak), but easy to bolt on for
+#      programmatic / curl-based access.
+#   C. Drop this HTTPRoute, port-forward only. Most secure, least
+#      convenient.
+# Phase #38b candidate: option A (oauth2-proxy).
+#
+# For now the operational benefit (live canary visualization for the
+# Phase #28-37 stack) outweighs the lab risk; documenting the gap
+# explicitly here so the next reader doesn't think this is hardened.
+# =============================================================================
+
+resource "kubectl_manifest" "rollouts_certificate" {
+  yaml_body = yamlencode({
+    apiVersion = "cert-manager.io/v1"
+    kind       = "Certificate"
+    metadata = {
+      name      = "rollouts-tls"
+      namespace = kubernetes_namespace.argo_rollouts.metadata[0].name
+    }
+    spec = {
+      secretName = "rollouts-tls"
+      dnsNames   = ["rollouts.${var.domain}"]
+      issuerRef = {
+        group = "cert-manager.io"
+        kind  = "ClusterIssuer"
+        name  = "letsencrypt-prod"
+      }
+      usages      = ["digital signature", "key encipherment"]
+      duration    = "2160h" # 90d
+      renewBefore = "720h"  # 30d
+    }
+  })
+}
+
+resource "kubectl_manifest" "rollouts_httproute" {
+  yaml_body = yamlencode({
+    apiVersion = "gateway.networking.k8s.io/v1"
+    kind       = "HTTPRoute"
+    metadata = {
+      name      = "rollouts-dashboard"
+      namespace = kubernetes_namespace.argo_rollouts.metadata[0].name
+      labels = {
+        app = "argo-rollouts-dashboard"
+      }
+    }
+    spec = {
+      parentRefs = [{
+        name        = "shared-gateway"
+        namespace   = "gateway-system"
+        sectionName = "rollouts-https"
+      }]
+      hostnames = ["rollouts.${var.domain}"]
+      rules = [{
+        matches = [{
+          path = { type = "PathPrefix", value = "/" }
+        }]
+        backendRefs = [{
+          # argo-rollouts-dashboard Service exposes port 3100 by
+          # default. Confirmed via the chart's templates/dashboard-
+          # service.yaml — port name "dashboard", targetPort 3100.
+          name = "argo-rollouts-dashboard"
+          port = 3100
+        }]
+      }]
+    }
+  })
+
+  depends_on = [
+    helm_release.argo_rollouts,
+    kubectl_manifest.rollouts_certificate,
+  ]
+}
