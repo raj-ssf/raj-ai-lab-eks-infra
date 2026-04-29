@@ -107,25 +107,37 @@ module "eks" {
     }
     aws-ebs-csi-driver = {
       most_recent = true
-      # Pod Identity exclusively. The role + binding live in
-      # iam-ebs-csi.tf:
-      #   aws_iam_role.ebs_csi (trust = pod_identity_trust)
-      #   aws_eks_pod_identity_association.ebs_csi (kube-system /
-      #     ebs-csi-controller-sa → role)
+      # Pod Identity is the working credential path (see iam-ebs-csi.tf:
+      # aws_iam_role.ebs_csi with pod_identity_trust + the matching
+      # aws_eks_pod_identity_association). The IRSA path through
+      # service_account_role_arn is a no-op — enable_irsa = false on
+      # this module disables the OIDC provider entirely, so the
+      # eks.amazonaws.com/role-arn annotation that the EKS add-on sets
+      # on ebs-csi-controller-sa cannot resolve.
       #
-      # Previously this block also set service_account_role_arn so the
-      # EKS add-on would annotate the SA with eks.amazonaws.com/role-arn
-      # for IRSA. The role's trust policy was already Pod-Identity-only
-      # (rebuilt during a prior IRSA→Pod-Identity migration), making
-      # the IRSA path a no-op — the annotation was zombie metadata that
-      # never resolved. Removed 2026-04-29 to align with the lab's
-      # Pod-Identity-exclusive policy across all 14 service workloads.
+      # We attempted to clean this up on 2026-04-29 by removing
+      # service_account_role_arn, but UpdateAddon failed with
+      # "AccessDeniedException: Cross-account pass role is not allowed"
+      # — Myriad's org-level SCP denies iam:PassRole when the calling
+      # principal originates from a different account, and our
+      # SAML-federated SSO identity (raj@MYGN → assume into 050693401425)
+      # gets evaluated as cross-account by the SCP even though the role
+      # itself is in 050693401425. The original CreateAddon worked from
+      # a different principal/path before the SCP tightened.
       #
-      # After `terraform apply` of this change, the live SA may keep
-      # the leftover annotation (EKS add-ons don't proactively clean up
-      # annotations they previously set). One-shot strip:
-      #   kubectl -n kube-system annotate sa ebs-csi-controller-sa \
-      #     eks.amazonaws.com/role-arn-
+      # The dual-binding is therefore intentional rather than oversight:
+      # we keep service_account_role_arn set so Terraform's UpdateAddon
+      # never tries to unset it (which would re-trigger the SCP denial).
+      # The zombie SA annotation is cosmetic noise; Pod Identity wins
+      # the credential chain and EBS CSI works normally.
+      #
+      # Recreating the add-on (delete + create without
+      # service_account_role_arn) would work — CreateAddon doesn't
+      # validate PassRole on the old role — but it introduces a ~30s
+      # window where new EBS volume provisioning fails. Not worth the
+      # risk for cosmetic cleanup. Revisit if Myriad ever loosens the
+      # SCP or this lab moves to a different account.
+      service_account_role_arn = aws_iam_role.ebs_csi.arn
     }
   }
 
