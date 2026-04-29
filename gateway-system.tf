@@ -66,42 +66,42 @@ locals {
   gateway_apps = {
     rag = {
       namespace        = "rag"
-      hostnames        = ["rag.ekstest.com"]
+      hostnames        = ["rag.${var.domain}"]
       cert_secret_name = "rag-tls"
     }
     langgraph = {
       namespace        = "langgraph"
-      hostnames        = ["langgraph.ekstest.com"]
+      hostnames        = ["langgraph.${var.domain}"]
       cert_secret_name = "langgraph-service-tls"
     }
     chat = {
       namespace        = "chat"
-      hostnames        = ["chat.ekstest.com"]
+      hostnames        = ["chat.${var.domain}"]
       cert_secret_name = "chat-ui-tls"
     }
     llm = {
       namespace        = "llm"
-      hostnames        = ["llm.ekstest.com"]
+      hostnames        = ["llm.${var.domain}"]
       cert_secret_name = "vllm-tls"
     }
     langfuse = {
       namespace        = "langfuse"
-      hostnames        = ["langfuse.ekstest.com"]
+      hostnames        = ["langfuse.${var.domain}"]
       cert_secret_name = "langfuse-tls"
     }
     grafana = {
       namespace        = "monitoring"
-      hostnames        = ["grafana.ekstest.com"]
+      hostnames        = ["grafana.${var.domain}"]
       cert_secret_name = "grafana-tls"
     }
     vault = {
       namespace        = "vault"
-      hostnames        = ["vault.ekstest.com"]
+      hostnames        = ["vault.${var.domain}"]
       cert_secret_name = "vault-tls"
     }
     argocd = {
       namespace = "argocd"
-      hostnames = ["argocd.ekstest.com"]
+      hostnames = ["argocd.${var.domain}"]
       # Helm chart auto-creates argocd-server-tls (chart's primary).
       # The duplicate argocd-tls Cert (extraTls config) is benign and
       # left in place; not used by the Gateway listener.
@@ -109,17 +109,17 @@ locals {
     }
     hello = {
       namespace        = "default"
-      hostnames        = ["hello.ekstest.com", "hello2.ekstest.com"]
+      hostnames        = ["hello.${var.domain}", "hello2.${var.domain}"]
       cert_secret_name = "hello-tls-prod"
     }
     keycloak = {
       namespace = "keycloak"
-      hostnames = ["keycloak.ekstest.com"]
+      hostnames = ["keycloak.${var.domain}"]
       # Bitnami chart's tls=true auto-creates this Secret name
       # ("<hostname>-tls"). The duplicate keycloak-tls Cert (extraTls
       # config) is benign and left in place; not used by the Gateway
       # listener.
-      cert_secret_name = "keycloak.ekstest.com-tls"
+      cert_secret_name = "keycloak.${var.domain}-tls"
     }
   }
 
