@@ -239,11 +239,15 @@ resource "kubectl_manifest" "rollouts_httproute" {
           path = { type = "PathPrefix", value = "/" }
         }]
         backendRefs = [{
-          # argo-rollouts-dashboard Service exposes port 3100 by
-          # default. Confirmed via the chart's templates/dashboard-
-          # service.yaml — port name "dashboard", targetPort 3100.
-          name = "argo-rollouts-dashboard"
-          port = 3100
+          # Phase #42: backendRef switched from
+          # argo-rollouts-dashboard:3100 to oauth2-proxy:80.
+          # oauth2-proxy intercepts unauthenticated requests, runs
+          # the OIDC dance against Keycloak, then forwards
+          # authenticated requests to argo-rollouts-dashboard
+          # internally as upstream. Service config in
+          # oauth2-proxy.tf.
+          name = "oauth2-proxy"
+          port = 80
         }]
       }]
     }
@@ -252,5 +256,6 @@ resource "kubectl_manifest" "rollouts_httproute" {
   depends_on = [
     helm_release.argo_rollouts,
     kubectl_manifest.rollouts_certificate,
+    helm_release.oauth2_proxy,
   ]
 }
