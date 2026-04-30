@@ -325,18 +325,44 @@ resource "helm_release" "kube_prometheus_stack" {
       alertmanager = {
         enabled = true
         alertmanagerSpec = {
-          # Phase #57 attempted replicas=2 for HA (peer-mesh-via-
-          # generated --cluster.peer flags). Helm upgrade hung
-          # indefinitely twice (15+ min) — likely PVC + sidecar +
-          # operator-webhook reconcile deadlock specific to the
-          # kube-prometheus-stack StatefulSet upgrade path under
-          # Phase #55's istio-injection. Reverted 2026-04-30 night
-          # to unblock other infra changes; pick up properly
-          # tomorrow when investigating the deadlock with rested
-          # eyes (likely: temporarily disable mutating webhook
-          # during chart upgrade, OR pre-create alertmanager-1
-          # PVC manually).
-          replicas = 1
+          # Phase #57b: 1 → 2 replicas. Phase #57's first attempt
+          # hung the helm upgrade for 15+ minutes and was reverted
+          # under a (now-known-wrong) hypothesis that alertmanager-1
+          # pod startup was the blocker — istio sidecar init +
+          # peer-mesh handshake + operator-webhook reconcile.
+          #
+          # Investigation 2026-04-30 (Phase #57b proper):
+          # Patched the Alertmanager CR directly (bypassing helm)
+          # to replicas=2. Both pods were 3/3 Running in 31 seconds
+          # with full Istio sidecar + peer-mesh + operator
+          # reconcile. Pod startup is NOT the issue.
+          #
+          # Real Phase #57 root cause: helm `wait: true` only
+          # blocks on resources the chart DIRECTLY creates
+          # (Deployments, DaemonSets, StatefulSets, Jobs). The
+          # Alertmanager CR is chart-rendered, but the resulting
+          # StatefulSet is created by the prometheus-operator —
+          # NOT chart-owned. So helm was never actually waiting on
+          # alertmanager pods. helm WAS waiting on:
+          #   - prometheus-operator Deployment
+          #   - kube-state-metrics Deployment
+          #   - prometheus-node-exporter DaemonSet
+          #   - GRAFANA Deployment (stuck CreateContainerConfigError
+          #     on missing kube-prometheus-stack-grafana Secret —
+          #     Phase #58c chart bug)
+          #   - prometheus-operator-admission Job
+          # The grafana stall consumed the full 900s timeout while
+          # everything else (including the alertmanager scale-up
+          # we blamed) was actually converging. Phase #58c fixed
+          # the grafana Secret bug; this re-attempt is unblocked.
+          #
+          # Lesson: "helm timeout" is too coarse to act on. Next
+          # time, instrument the apply with:
+          #   kubectl get pods -A --field-selector=status.phase!=Running
+          #   kubectl get events -A --sort-by=.lastTimestamp
+          # to identify the actual blocker before drawing
+          # architectural conclusions.
+          replicas = 2
           resources = {
             requests = {
               cpu    = "20m"
