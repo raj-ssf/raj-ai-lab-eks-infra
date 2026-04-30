@@ -106,6 +106,23 @@ resource "helm_release" "istiod" {
       # Phase #59 (gateway-system).
       pilot = {
         replicaCount = 2
+        # The istiod chart enables HPA by default with autoscaleMin=1.
+        # When HPA is enabled, it continuously reconciles
+        # deployment.spec.replicas to its calculated value, which
+        # OVERRIDES the helm replicaCount: helm applies the initial
+        # value, the HPA controller scales back down to its
+        # minReplicas (1) within ~15s because CPU is below the 80%
+        # threshold. Raising autoscaleMin to 2 makes 2 the HPA
+        # floor, so we keep the load-driven scale-up benefit while
+        # ensuring 2 pods at idle.
+        # Discovered Phase #60 first apply: replicaCount=2 landed,
+        # then HPA scaled to 1 within 30s. PDB allowedDisruptions=0
+        # didn't help — that only protects against voluntary
+        # eviction, not HPA scale-down (HPA writes to .spec.replicas
+        # directly, bypassing eviction).
+        autoscaleEnabled = true
+        autoscaleMin     = 2
+        autoscaleMax     = 5 # chart default, kept explicit
         affinity = {
           podAntiAffinity = {
             preferredDuringSchedulingIgnoredDuringExecution = [{
