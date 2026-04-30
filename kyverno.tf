@@ -143,6 +143,45 @@ resource "helm_release" "kyverno" {
           limits   = { cpu = "200m", memory = "256Mi" }
         }
       }
+
+      # Phase #58 + Broadcom-rename fix: kyverno chart 3.3.5 hardcodes
+      # `bitnami/kubectl:1.30.2` for two post-upgrade hook Jobs
+      # (webhooks-cleanup + policy-reports-cleanup). That image was
+      # removed from Docker Hub during the late-2024 Bitnami →
+      # Broadcom rename — pulls now return 404. Result: every helm
+      # upgrade hangs indefinitely on these hook Jobs in
+      # ImagePullBackOff, and helm marks the upgrade as failed
+      # AFTER its 5-15 min timeout.
+      #
+      # Discovered live during Phase #58's first apply:
+      #   pod/kyverno-clean-reports-r5fsq:
+      #     "failed to resolve reference docker.io/bitnami/kubectl:
+      #      1.30.2: not found"
+      #
+      # Override to `docker.io/bitnamilegacy/kubectl:1.33.4-debian-
+      # 12-r0` which IS available (same image we used in Phase #54
+      # for the 405B staging Job after hitting this exact gotcha).
+      # The Kyverno catchall allowlist already includes
+      # `docker.io/bitnamilegacy/*` so admission won't block these
+      # hook pods.
+      #
+      # Why not upstream-fix kyverno chart: the bug exists in
+      # released 3.3.x; an upgrade to 3.4+ is its own change and
+      # may bring API surface drift. Override is the surgical fix.
+      webhooksCleanup = {
+        image = {
+          registry   = "docker.io"
+          repository = "bitnamilegacy/kubectl"
+          tag        = "1.33.4-debian-12-r0"
+        }
+      }
+      policyReportsCleanup = {
+        image = {
+          registry   = "docker.io"
+          repository = "bitnamilegacy/kubectl"
+          tag        = "1.33.4-debian-12-r0"
+        }
+      }
     })
   ]
 
