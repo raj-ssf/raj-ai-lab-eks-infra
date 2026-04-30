@@ -23,6 +23,71 @@ resource "kubernetes_namespace" "monitoring" {
 # podAnnotations block in the grafana values below, and vault-config.tf
 # for the policy/role/KV entry).
 
+# Phase #69: alertmanager receiver-config computation.
+#
+# Each local resolves to either an empty map {} (when the corresponding
+# var.* is unset) or a single-key map containing the chart's expected
+# slack_configs / pagerduty_configs structure. The receivers block in
+# the helm values uses merge() to fold these into the receiver
+# definitions only when populated.
+#
+# Why locals instead of inline conditionals:
+# 1. Keeps the receivers block in the helm values readable.
+# 2. Centralizes the message-formatting templates so updating the
+#    Slack title/text/color only touches one place.
+# 3. Makes adding a 3rd receiver (e.g., severity=info → email) a
+#    parallel-line edit rather than a structural change.
+locals {
+  alertmanager_page_slack_configs = var.slack_webhook_critical_url != "" ? {
+    slack_configs = [{
+      api_url       = var.slack_webhook_critical_url
+      channel       = "#alerts-critical"
+      send_resolved = true
+      color         = "danger"
+      title         = "[CRITICAL] {{ .GroupLabels.alertname }} on {{ .GroupLabels.service }}"
+      text          = <<-EOT
+        {{ range .Alerts -}}
+        *Severity:* {{ .Labels.severity }}
+        *Description:* {{ .Annotations.description }}
+        *Runbook:* {{ .Annotations.runbook_url }}
+        *Started:* {{ .StartsAt }}
+        {{ end }}
+      EOT
+    }]
+  } : {}
+
+  alertmanager_page_pagerduty_configs = var.pagerduty_routing_key != "" ? {
+    pagerduty_configs = [{
+      routing_key = var.pagerduty_routing_key
+      severity    = "critical"
+      description = "{{ .GroupLabels.alertname }} on {{ .GroupLabels.service }}"
+      details = {
+        firing       = "{{ .Alerts.Firing | len }}"
+        runbook      = "{{ range .Alerts }}{{ .Annotations.runbook_url }}{{ end }}"
+        description  = "{{ range .Alerts }}{{ .Annotations.description }}{{ end }}"
+        num_resolved = "{{ .Alerts.Resolved | len }}"
+      }
+    }]
+  } : {}
+
+  alertmanager_ticket_slack_configs = var.slack_webhook_warning_url != "" ? {
+    slack_configs = [{
+      api_url       = var.slack_webhook_warning_url
+      channel       = "#alerts-warnings"
+      send_resolved = true
+      color         = "warning"
+      title         = "[WARNING] {{ .GroupLabels.alertname }} on {{ .GroupLabels.service }}"
+      text          = <<-EOT
+        {{ range .Alerts -}}
+        *Severity:* {{ .Labels.severity }}
+        *Description:* {{ .Annotations.description }}
+        *Started:* {{ .StartsAt }}
+        {{ end }}
+      EOT
+    }]
+  } : {}
+}
+
 # Phase #58c: Grafana admin Secret managed explicitly by terraform.
 #
 # Background — why this Secret has to exist out-of-band:
@@ -424,26 +489,47 @@ resource "helm_release" "kube_prometheus_stack" {
               equal           = ["service"]
             },
           ]
+          # Phase #69: receivers wired conditionally on the
+          # var.slack_webhook_*_url + var.pagerduty_routing_key
+          # tfvars. When ALL are empty (default), behavior is
+          # identical to pre-#69 — alerts route through the
+          # pipeline but the receivers' configs lists are empty
+          # so nothing is delivered. When variables are set in
+          # terraform.tfvars (gitignored), the corresponding
+          # slack_configs / pagerduty_configs entries materialize
+          # in the rendered Alertmanager config.
+          #
+          # Cost of a false positive: a Slack message + a
+          # PagerDuty page. Cost of a false negative (alert
+          # quietly dropped): silent outage. We err toward the
+          # former — both PagerDuty AND Slack get the critical,
+          # so even if one delivery channel is down (PagerDuty
+          # incident, Slack workspace outage), the operator
+          # still sees it.
           receivers = [
             {
               # Default sink. send_resolved=false so we don't even
               # try to POST resolution events on a fake URL.
               name = "null"
             },
-            {
-              # Page-tier receiver. Wire a real Slack incoming-
-              # webhook URL via slack_api_url, or a PagerDuty
-              # routing_key via a pagerduty_configs entry. Today
-              # both lists are empty → behaves identically to
-              # "null".
-              name = "page-receivers"
-            },
-            {
-              # Ticket-tier receiver. Same shape — empty today.
-              # Wire a Slack webhook to a #alerts-tickets channel
-              # or an email_configs SMTP block when ready.
-              name = "ticket-receivers"
-            },
+            merge(
+              { name = "page-receivers" },
+              # Slack delivery for criticals — when URL is set.
+              # send_resolved=true so a fired-then-cleared incident
+              # gets an "all clear" message in the same channel.
+              local.alertmanager_page_slack_configs,
+              # PagerDuty delivery for criticals — when routing key
+              # is set. Independent of Slack — both fire if both
+              # are wired, giving operators redundant signal paths.
+              local.alertmanager_page_pagerduty_configs,
+            ),
+            merge(
+              { name = "ticket-receivers" },
+              # Slack delivery for warnings — when URL is set.
+              # No PagerDuty for warnings; warnings are ticket-tier,
+              # not page-tier, by definition.
+              local.alertmanager_ticket_slack_configs,
+            ),
           ]
         }
       }
