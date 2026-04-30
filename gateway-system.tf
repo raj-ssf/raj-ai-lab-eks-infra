@@ -408,12 +408,21 @@ resource "null_resource" "gateway_replicas_patch" {
     # Karpenter NodePools, so required was unsatisfiable. Trigger
     # value just needs to be unique-per-config-change; bump when
     # editing the patch payload below.
-    affinity_mode = "preferred-v1"
+    affinity_mode = "preferred-v2"
   }
 
+  # JSON merge patch (NOT strategic). Strategic merge preserves
+  # omitted fields, so the previous "preferred-v1" patch left
+  # the legacy `requiredDuringSchedulingIgnoredDuringExecution`
+  # alongside the new preferred — and required wins, leaving the
+  # new RS pod Pending. JSON merge patch with an explicit null
+  # for required REMOVES it. The omitted nodeAffinity field is
+  # also preserved by JSON merge (merge applies recursively to
+  # objects), so the gateway_nodeaffinity_patch's us-west-2a
+  # constraint stays intact.
   provisioner "local-exec" {
     command = <<-EOT
-      kubectl -n gateway-system patch deployment shared-gateway-istio --type=strategic --patch '{
+      kubectl -n gateway-system patch deployment shared-gateway-istio --type=merge --patch '{
         "spec": {
           "replicas": ${self.triggers.replicas},
           "template": {
@@ -430,7 +439,8 @@ resource "null_resource" "gateway_replicas_patch" {
                       },
                       "topologyKey": "kubernetes.io/hostname"
                     }
-                  }]
+                  }],
+                  "requiredDuringSchedulingIgnoredDuringExecution": null
                 }
               }
             }
