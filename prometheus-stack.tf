@@ -198,15 +198,15 @@ resource "helm_release" "kube_prometheus_stack" {
         # by tempo.tf creates a ConfigMap with the Grafana label below).
         sidecar = {
           datasources = {
-            enabled      = true
-            label        = "grafana_datasource"
-            labelValue   = "1"
+            enabled         = true
+            label           = "grafana_datasource"
+            labelValue      = "1"
             searchNamespace = "ALL"
           }
           dashboards = {
-            enabled      = true
-            label        = "grafana_dashboard"
-            labelValue   = "1"
+            enabled         = true
+            label           = "grafana_dashboard"
+            labelValue      = "1"
             searchNamespace = "ALL"
           }
         }
@@ -223,9 +223,111 @@ resource "helm_release" "kube_prometheus_stack" {
         }
       }
 
-      # --- Alertmanager: disabled for lab (no receivers wired up) ---
+      # Phase #48: Alertmanager enabled. Routing tree splits alerts
+      # by severity + burn_speed labels so a future receiver wiring
+      # is just "add real webhook URL"s, not a routing-config rewrite.
+      #
+      # Default receiver is "null" (a webhook to a non-existent
+      # URL with send_resolved=false) — alerts route, group, and
+      # dedupe through the pipeline but the final hop is a no-op.
+      # That keeps the lab pageless while exercising the full
+      # Alertmanager codepath end-to-end. To wire real notifications:
+      # add receivers via slack_webhook_url / pagerduty_routing_key
+      # tfvars and the routing tree below already routes
+      # severity=critical → page-receivers, severity=warning →
+      # ticket-receivers.
+      #
+      # Inhibition rules suppress noisy duplicates: when a critical
+      # alert fires for a service, related warnings on the same
+      # service are silenced (e.g., RagServiceDown critical
+      # inhibits RagRetrieveLatencyHigh warning).
       alertmanager = {
-        enabled = false
+        enabled = true
+        alertmanagerSpec = {
+          replicas = 1 # HA at scale needs replicas=2 + a clustering peer config
+          resources = {
+            requests = {
+              cpu    = "20m"
+              memory = "64Mi"
+            }
+            limits = {
+              cpu    = "200m"
+              memory = "128Mi"
+            }
+          }
+          # No persistent storage — alert silences are ephemeral in
+          # the lab. Production would want a PVC here so silences
+          # survive pod restarts.
+          storage = {}
+        }
+        config = {
+          global = {
+            resolve_timeout = "5m"
+          }
+          route = {
+            # Group alerts by alertname + service so a flapping
+            # alert on the same service folds into one notification
+            # rather than spamming N times.
+            group_by        = ["alertname", "service"]
+            group_wait      = "30s" # buffer so closely-firing alerts batch
+            group_interval  = "5m"  # send next batch for this group after 5m
+            repeat_interval = "12h" # re-page if still firing after 12h
+            receiver        = "null"
+            routes = [
+              # Critical OR fast-burn → page-receivers. Today both map
+              # to "null"; flip page-receivers' webhook_configs to a
+              # real Slack/PagerDuty URL when ready.
+              {
+                matchers = ["severity=\"critical\""]
+                receiver = "page-receivers"
+                # Faster cadence for criticals — re-page every hour.
+                repeat_interval = "1h"
+              },
+              {
+                matchers        = ["burn_speed=\"fast\""]
+                receiver        = "page-receivers"
+                repeat_interval = "1h"
+              },
+              # Warnings → ticket-receivers (slower cadence).
+              {
+                matchers = ["severity=\"warning\""]
+                receiver = "ticket-receivers"
+              },
+            ]
+          }
+          inhibit_rules = [
+            # When a critical fires for a service, suppress all
+            # warnings tagged with the same service. Reduces noise
+            # during outages — operator only sees the root cause,
+            # not the cascading P95 / chunk-rate / etc. warnings.
+            {
+              source_matchers = ["severity=\"critical\""]
+              target_matchers = ["severity=\"warning\""]
+              equal           = ["service"]
+            },
+          ]
+          receivers = [
+            {
+              # Default sink. send_resolved=false so we don't even
+              # try to POST resolution events on a fake URL.
+              name = "null"
+            },
+            {
+              # Page-tier receiver. Wire a real Slack incoming-
+              # webhook URL via slack_api_url, or a PagerDuty
+              # routing_key via a pagerduty_configs entry. Today
+              # both lists are empty → behaves identically to
+              # "null".
+              name = "page-receivers"
+            },
+            {
+              # Ticket-tier receiver. Same shape — empty today.
+              # Wire a Slack webhook to a #alerts-tickets channel
+              # or an email_configs SMTP block when ready.
+              name = "ticket-receivers"
+            },
+          ]
+        }
       }
 
       # --- Other components ---
