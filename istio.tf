@@ -51,7 +51,7 @@ resource "helm_release" "istio_cni" {
     yamlencode({
       cni = {
         # Chained mode: inserted after VPC CNI in /etc/cni/net.d.
-        chained      = true
+        chained           = true
         excludeNamespaces = ["kube-system", "istio-system"]
       }
     })
@@ -76,10 +76,49 @@ resource "helm_release" "istiod" {
           clusterName = module.eks.cluster_name
         }
       }
-      # Keep the control plane small for a 3-node lab. Bump replicas/memory
-      # when the mesh grows beyond a handful of workloads.
+      # Phase #60: 1 → 2 replicas. The original "keep the control
+      # plane small for a 3-node lab" comment was right when the
+      # mesh spanned ~5 namespaces. Today istio_meshed_namespaces
+      # (rag, qdrant, keycloak, argocd, langgraph) plus the
+      # separately-labelled monitoring + argo-rollouts + chat +
+      # ingestion + langfuse + gateway-system means istiod is in
+      # the synchronous path of:
+      #   - sidecar injection for every CREATE in any of ~10 ns
+      #   - xDS push to every meshed pod on config change
+      #   - admission webhook for every CRUD on Sidecar/
+      #     ServiceEntry/PeerAuthentication/AuthorizationPolicy
+      # Single-pod istiod = one OOM/restart pauses ALL of that for
+      # 30-60s while the replacement pod becomes Ready.
+      #
+      # Unlike argo-rollouts (leader-election standby), istiod's
+      # xDS server is stateless. Service round-robin distributes
+      # xDS requests across healthy pods, so 2 replicas double
+      # throughput AND give pod-failure HA. The chart auto-creates
+      # a PodDisruptionBudget at replicas>1 (maxUnavailable=1) so
+      # node drains can't take both pods down simultaneously.
+      #
+      # Anti-affinity preferred (not required) to spread across
+      # nodes when possible. Cluster has 3 static nodes across 3
+      # AZs (no AZ pinning on istiod), so spread is satisfiable
+      # today. preferred is still the right choice — if the
+      # cluster ever loses a node mid-rollout, scheduler colocates
+      # rather than leaving istiod degraded. Same lesson as
+      # Phase #59 (gateway-system).
       pilot = {
-        replicaCount = 1
+        replicaCount = 2
+        affinity = {
+          podAntiAffinity = {
+            preferredDuringSchedulingIgnoredDuringExecution = [{
+              weight = 100
+              podAffinityTerm = {
+                labelSelector = {
+                  matchLabels = { istio = "pilot" }
+                }
+                topologyKey = "kubernetes.io/hostname"
+              }
+            }]
+          }
+        }
         resources = {
           requests = { cpu = "100m", memory = "256Mi" }
           limits   = { cpu = "500m", memory = "512Mi" }
