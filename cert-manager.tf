@@ -68,6 +68,54 @@ resource "helm_release" "cert_manager" {
         name   = "cert-manager"
         # No annotations needed: Pod Identity binds the SA to the role.
       }
+      # Phase #61: cert-manager-webhook 1 → 2 replicas. The webhook
+      # is in the admission path of EVERY Certificate, Issuer, and
+      # ClusterIssuer CRUD in the cluster (validating + mutating
+      # webhooks both run here). Single-pod failure during chart
+      # upgrade or OOM = stalled cert issuance and renewal.
+      #
+      # The lab has ~10 Certificates today (chat, grafana, vault,
+      # keycloak, langfuse, argocd, rollouts, prometheus, gateway
+      # listeners, and more) all auto-renewed via Let's Encrypt.
+      # If the webhook is down at renewal time, the renewal
+      # CertificateRequest sits Pending until the webhook comes
+      # back. With 90-day cert lifetimes and 30-day renewBefore
+      # this is unlikely to cause an outage, but it's a real gap.
+      #
+      # Anti-affinity: preferredDuringSchedulingIgnoredDuringExecution
+      # weight=100 topologyKey=hostname. cert-manager isn't AZ-pinned,
+      # so cross-node spread is satisfiable (3 static nodes across 3
+      # AZs). Same Phase #59/60 lesson — preferred over required so
+      # the second pod schedules even in node-constrained moments.
+      #
+      # Why NOT bump controller (top-level replicaCount) or cainjector:
+      # both use leader election (Lease in cert-manager ns). A second
+      # replica is warm-standby only — adds memory cost without
+      # throughput. Failover takes ~15s on lease expiry. controller
+      # failure delays new Certificate issuance briefly but doesn't
+      # block; cainjector failure delays CA-bundle patching of CRDs
+      # but doesn't affect existing certs. Phase #61b candidate if
+      # we want true HA on these too.
+      webhook = {
+        replicaCount = 2
+        affinity = {
+          podAntiAffinity = {
+            preferredDuringSchedulingIgnoredDuringExecution = [{
+              weight = 100
+              podAffinityTerm = {
+                labelSelector = {
+                  matchLabels = {
+                    "app.kubernetes.io/name"      = "webhook"
+                    "app.kubernetes.io/instance"  = "cert-manager"
+                    "app.kubernetes.io/component" = "webhook"
+                  }
+                }
+                topologyKey = "kubernetes.io/hostname"
+              }
+            }]
+          }
+        }
+      }
     })
   ]
 
