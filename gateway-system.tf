@@ -344,6 +344,85 @@ resource "null_resource" "gateway_nodeaffinity_patch" {
 }
 
 # =============================================================================
+# Phase #59: Patch the Istio-created gateway Deployment to run 2
+# replicas instead of the chart default of 1.
+#
+# WHY: shared-gateway-istio is the ingress for everything in the lab
+# — chat.${var.domain}, grafana.${var.domain}, kc.${var.domain},
+# rollouts.${var.domain}, vault.${var.domain}, langfuse.${var.domain},
+# argocd.${var.domain}. A single-pod gateway means that ANY restart
+# (rolling update from istio upgrade, OOM, node drain, eviction)
+# drops external traffic to the entire lab for ~10-30s while the
+# replacement pod becomes Ready. With 2 pods + NLB target-group
+# round-robin, the surviving pod carries traffic during the rollout.
+#
+# AZ-FAILURE LIMITATION (out of scope for this phase):
+# The lab VPC has only one Public-tagged subnet (us-west-2a). NLBs
+# only forward to targets in the AZs where they have subnets, so
+# both gateway pods MUST land in us-west-2a (enforced by
+# null_resource.gateway_nodeaffinity_patch above). This protects
+# against POD failures but NOT against AZ-2a outages — if 2a
+# evaporates, the NLB has no path and ingress is dead either way.
+#
+# Phase #59b candidate: add Public subnets in us-west-2b/c, expand
+# the NLB subnets list, drop the single-AZ nodeAffinity, and add
+# topologyspread/anti-affinity to spread pods across AZs. That's a
+# real network-layer change (new subnets, route tables, IGW
+# associations) — not a 1-line replicas bump.
+#
+# Anti-affinity: requires the two pods to land on DIFFERENT nodes
+# within us-west-2a. Cluster has multiple m5.xlarge static nodes in
+# 2a (Karpenter spawns more under load), so this scheduling
+# constraint is satisfiable. If it ever can't be satisfied (single
+# 2a node + Karpenter capacity error) the second pod stays Pending
+# rather than colocate — failure-mode acceptable for the lab.
+#
+# Persistence: same caveat as the nodeAffinity patch. Istio's
+# gateway controller doesn't continuously reconcile the Deployment,
+# so this patch sticks across normal cluster ops. Istio upgrades
+# that recreate the Deployment require this null_resource to be
+# tainted to re-apply (same as nodeAffinity).
+# =============================================================================
+
+resource "null_resource" "gateway_replicas_patch" {
+  triggers = {
+    replicas    = "2"
+    gateway_uid = kubectl_manifest.shared_gateway.uid
+  }
+
+  provisioner "local-exec" {
+    command = <<-EOT
+      kubectl -n gateway-system patch deployment shared-gateway-istio --type=strategic --patch '{
+        "spec": {
+          "replicas": ${self.triggers.replicas},
+          "template": {
+            "spec": {
+              "affinity": {
+                "podAntiAffinity": {
+                  "requiredDuringSchedulingIgnoredDuringExecution": [{
+                    "labelSelector": {
+                      "matchLabels": {
+                        "gateway.networking.k8s.io/gateway-name": "shared-gateway"
+                      }
+                    },
+                    "topologyKey": "kubernetes.io/hostname"
+                  }]
+                }
+              }
+            }
+          }
+        }
+      }'
+    EOT
+  }
+
+  depends_on = [
+    kubectl_manifest.shared_gateway,
+    null_resource.gateway_nodeaffinity_patch,
+  ]
+}
+
+# =============================================================================
 # Per-app resources: invoke the gateway-app module once per entry in
 # local.gateway_apps. Each invocation creates a ReferenceGrant + an
 # AuthorizationPolicy in the target namespace.
