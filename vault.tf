@@ -113,9 +113,46 @@ resource "helm_release" "vault" {
       # --- Agent Injector (mutating webhook + controller) ------------------
       # Pods annotated with vault.hashicorp.com/agent-inject=true get init +
       # sidecar containers that fetch secrets via the pod's SA token.
+      #
+      # Phase #62: 1 → 2 replicas. The injector serves a Mutating-
+      # WebhookConfiguration that runs on EVERY pod CREATE in any
+      # namespace where vault-injection is annotated. Lab workloads
+      # using the injector today: grafana (admin password +
+      # OIDC client secret), langgraph-service, rag-service,
+      # ingestion-service, chat-ui (KV reads on first start). A
+      # single-pod injector means any restart pauses pod creation
+      # cluster-wide for ~30s while the new pod becomes Ready —
+      # specifically, the webhook's failurePolicy=Ignore would let
+      # pods through, but the chart sets failurePolicy=Fail so
+      # mid-restart pod creates get rejected with TLS handshake
+      # errors until recovery.
+      #
+      # 2 replicas behind the existing vault-agent-injector-svc
+      # Service give the webhook proper pod-failure HA. Anti-
+      # affinity (heredoc string per chart convention) prefers
+      # different nodes; 3 static nodes available so spread is
+      # satisfiable. Used "preferred" not "required" — same
+      # Phase #59/#60 lesson.
       injector = {
         enabled  = true
-        replicas = 1
+        replicas = 2
+
+        # Chart uses YAML-string convention for affinity (same as
+        # server.affinity above). Preferred anti-affinity on hostname
+        # so the 2 injector pods spread across nodes when possible
+        # but colocate if the cluster is constrained.
+        affinity = <<-EOT
+          podAntiAffinity:
+            preferredDuringSchedulingIgnoredDuringExecution:
+              - weight: 100
+                podAffinityTerm:
+                  labelSelector:
+                    matchLabels:
+                      app.kubernetes.io/name: vault-agent-injector
+                      app.kubernetes.io/instance: vault
+                      component: webhook
+                  topologyKey: kubernetes.io/hostname
+        EOT
 
         resources = {
           requests = { cpu = "50m", memory = "64Mi" }
