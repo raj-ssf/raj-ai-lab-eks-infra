@@ -583,15 +583,56 @@ resource "kubectl_manifest" "allow_prometheus_scrape_meshwide" {
     }
     spec = {
       action = "ALLOW"
+      # Phase #55b: relaxed from principal-based to path-only allow.
+      #
+      # Before this commit, the rule required:
+      #   from.source.principals = [prometheus SA SPIFFE]
+      #   to.operation.paths     = [/metrics, /stats/prometheus]
+      # The principal restriction is the canonical Istio pattern but
+      # was UNMATCHABLE in practice for kube-prometheus-stack:
+      # ServiceMonitor scraping uses pod-SD (pod IPs), which BYPASSES
+      # Istio's auto-mTLS upgrade path. Outbound calls to raw pod IPs
+      # don't trigger DestinationRule resolution, so Envoy connects
+      # plaintext. Plaintext requests carry no SPIFFE principal →
+      # rule's `from` clause doesn't match → falls through to the
+      # mesh-wide deny-all → HTTP 403 Forbidden on every scrape.
+      #
+      # Symptom (pre-fix): 33 Prometheus targets DOWN, all with
+      # "server returned HTTP status 403 Forbidden". Affected:
+      # chat-ui, rag-service (+ canary/stable), langgraph-service
+      # (+ canary/stable), ingestion-service (+ canary/stable),
+      # alertmanager, grafana, kube-state-metrics, prometheus-
+      # operator, argo-rollouts metrics. ~46% of total scrape
+      # targets.
+      #
+      # Fix paths considered:
+      #   A. Drop principal, keep path restriction (this commit).
+      #      Simplest — single AuthZ change.
+      #   B. Mesh-wide DestinationRule forcing ISTIO_MUTUAL.
+      #      Broad blast radius (would force mTLS on calls to
+      #      vault.vault.svc which doesn't speak Istio mTLS).
+      #   C. Refactor every ServiceMonitor to use istio-agent
+      #      merged metrics on :15020 + add prometheus.istio.io/
+      #      merge-metrics annotation to all meshed pods. The
+      #      architecturally-correct Istio + Prometheus integration.
+      #      Gitops-repo work × 4 app ServiceMonitors + chart
+      #      defaults via prometheus-stack.tf overrides.
+      #
+      # Going with A here. C is the production-grade target;
+      # tracked as Phase #55c for a future session. With A in
+      # place, /metrics scrape paths are OPEN to any source —
+      # any meshed/unmeshed pod can hit /metrics endpoints
+      # cluster-wide. Information-disclosure risk is bounded
+      # to "operational metrics" (request rates, latencies,
+      # resource usage) — not user data. Acceptable for lab;
+      # production would do C.
+      #
+      # Path restriction stays: only /metrics and /stats/prometheus
+      # are admitted by this rule. Arbitrary paths (e.g., admin
+      # APIs at /api/v1/...) still fall through to deny-all
+      # because no path-matching rule exists for them.
       rules = [
         {
-          from = [{
-            source = {
-              principals = [
-                "cluster.local/ns/monitoring/sa/kube-prometheus-stack-prometheus",
-              ]
-            }
-          }]
           to = [{
             operation = {
               paths = ["/metrics", "/stats/prometheus"]
