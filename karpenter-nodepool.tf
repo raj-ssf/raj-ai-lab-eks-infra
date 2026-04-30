@@ -110,8 +110,8 @@ resource "kubectl_manifest" "karpenter_nodepool_gpu" {
       template = {
         metadata = {
           labels = {
-            workload              = "gpu"
-            "nvidia.com/gpu"      = "true"
+            workload                 = "gpu"
+            "nvidia.com/gpu"         = "true"
             "nvidia.com/gpu.present" = "true"
           }
         }
@@ -163,7 +163,7 @@ resource "kubectl_manifest" "karpenter_nodepool_gpu" {
           # (e.g., if a vllm pod is stuck Ready but actually wedged, you
           # can force a new node by deleting the stuck pod). Setting
           # expireAfter=Never would disable this; 30d is the safe default.
-          expireAfter = "720h"  # 30 days
+          expireAfter = "720h" # 30 days
         }
       }
       # Scale-to-zero. When the vllm Deployment goes to replicas=0 (demo
@@ -181,9 +181,9 @@ resource "kubectl_manifest" "karpenter_nodepool_gpu" {
       # count in the app repo (raj-ai-lab-eks/llm/base/deployment.yaml,
       # replicas=0 as steady state) — no pods requesting GPUs, no node.
       limits = {
-        cpu              = "96"    # 48 vCPU × 2 instances
+        cpu              = "96" # 48 vCPU × 2 instances
         memory           = "400Gi"
-        "nvidia.com/gpu" = "8"     # 4 GPUs × 2 instances
+        "nvidia.com/gpu" = "8" # 4 GPUs × 2 instances
       }
     }
   })
@@ -274,18 +274,18 @@ resource "kubectl_manifest" "karpenter_nodepool_gpu_experiments" {
                 # comfortably). NOT suitable for 70B AWQ — quantized 70B
                 # plus KV cache exceeds L4's 24 GB. Reserved for the
                 # embedding tier and any future small-model variants.
-                "g6.xlarge",       # 1× L4 24GB (Ada) — $0.80/hr
+                "g6.xlarge", # 1× L4 24GB (Ada) — $0.80/hr
                 # 1-GPU cheapest single-GPU path for quantized 70B.
                 # Requires --tensor-parallel-size=1.
-                "g6e.xlarge",      # 1× L40S 48GB (Ada)
+                "g6e.xlarge", # 1× L40S 48GB (Ada)
                 # 4-GPU Ada with 2× VRAM of g6 — room for unquantized
                 # 70B FP16 comparison if desired.
-                "g6e.12xlarge",    # 4× L40S 48GB (Ada)
+                "g6e.12xlarge", # 4× L40S 48GB (Ada)
                 # Classic datacenter GPU. NVSwitch-backed TP=8.
-                "p4d.24xlarge",    # 8× A100 40GB (Ampere)
+                "p4d.24xlarge", # 8× A100 40GB (Ampere)
                 # Portfolio-flex option. Hopper + NVSwitch + 3.2 Tbps
                 # EFA. Overkill for inference but impressive headline.
-                "p5.48xlarge",     # 8× H100 80GB (Hopper)
+                "p5.48xlarge", # 8× H100 80GB (Hopper)
               ]
             },
             {
@@ -294,10 +294,33 @@ resource "kubectl_manifest" "karpenter_nodepool_gpu_experiments" {
               values   = ["on-demand"]
             },
             {
-              # AZ pin matches vllm-model-cache PVC's EBS zone.
+              # Phase #54c (2026-04-29): widened from us-west-2c-only
+              # to all 4 us-west-2 AZs because AWS hit Insufficient-
+              # InstanceCapacity for both p4d.24xlarge AND p5.48xlarge
+              # in us-west-2c during the 405B smoke test, while
+              # capacity was available in us-west-2a/b/d per AWS's
+              # error message ("You can currently get p4d.24xlarge
+              # capacity by [...] choosing us-west-2a, us-west-2b,
+              # us-west-2d.").
+              #
+              # Trade-off: workloads using gp3 PVCs in this NodePool
+              # need to be aware that EBS is AZ-locked. Specifically,
+              # vllm-cache-llama-405b-gp3 was provisioned in us-
+              # west-2c (Phase #52a staging Job ran there); pods
+              # mounting it must still land in us-west-2c. The
+              # vllm-llama-405b Deployment was reverted to the S3-
+              # Mountpoint PVC (vllm-cache-llama-405b, region-
+              # scoped) precisely so it can land in any AZ.
+              #
+              # Other workloads in this NodePool (variant
+              # Deployments) similarly need region-scoped storage
+              # OR an explicit topology.kubernetes.io/zone pin on
+              # their pod spec. The vllm-model-cache PVC reference
+              # in the previous comment was misleading — that PVC
+              # is on the default GPU NodePool, not gpu-experiments.
               key      = "topology.kubernetes.io/zone"
               operator = "In"
-              values   = ["us-west-2c"]
+              values   = ["us-west-2a", "us-west-2b", "us-west-2c", "us-west-2d"]
             },
             {
               key      = "kubernetes.io/arch"
@@ -316,8 +339,8 @@ resource "kubectl_manifest" "karpenter_nodepool_gpu_experiments" {
         consolidateAfter    = "30s"
       }
       limits = {
-        cpu              = "192"     # p5.48xlarge = 192 vCPU
-        memory           = "2048Gi"  # p5.48xlarge = 2 TiB RAM
+        cpu              = "192"    # p5.48xlarge = 192 vCPU
+        memory           = "2048Gi" # p5.48xlarge = 2 TiB RAM
         "nvidia.com/gpu" = "8"
       }
     }
