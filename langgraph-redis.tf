@@ -69,17 +69,54 @@
 # =============================================================================
 
 resource "helm_release" "langgraph_redis_ha" {
-  name       = "langgraph-redis-ha"
-  namespace  = "langgraph"
-  repository = "https://charts.bitnami.com/bitnami"
+  name      = "langgraph-redis-ha"
+  namespace = "langgraph"
+  # OCI repo (NOT https://charts.bitnami.com/bitnami): Bitnami HTTPS
+  # charts depend on an OCI-only `common` library; the helm terraform
+  # provider fails to resolve that dependency when the parent is
+  # fetched via HTTPS. Pulling the parent from OCI avoids the
+  # mismatch. Same pattern as keycloak_postgres in keycloak.tf:28.
+  repository = "oci://registry-1.docker.io/bitnamicharts"
   chart      = "redis"
-  # Bitnami chart pinned for reproducibility.
-  version = "20.6.2"
+  version    = "20.6.2"
 
   values = [
     yamlencode({
       # 1 master + 2 replicas + Sentinel sidecars in each pod.
       architecture = "replication"
+
+      # Bitnami's 2025 pricing change made `bitnami/*` images non-free
+      # (anonymous pulls return 401). Override to `bitnamilegacy/*`
+      # which remain freely pullable. Same pattern as keycloak.tf's
+      # postgres image override + Phase #58 kyverno cleanup-job
+      # bitnamilegacy/kubectl override. Pinning to a specific Redis
+      # tag because bitnamilegacy doesn't always carry the chart's
+      # default-tag latest.
+      image = {
+        registry   = "docker.io"
+        repository = "bitnamilegacy/redis"
+        tag        = "7.4.1-debian-12-r0"
+      }
+
+      sentinel = {
+        # Sentinel sidecar image override — same bitnamilegacy story.
+        image = {
+          registry   = "docker.io"
+          repository = "bitnamilegacy/redis-sentinel"
+          tag        = "7.4.1-debian-12-r0"
+        }
+
+        # Sentinel: enabled by default at architecture=replication. Each
+        # redis pod runs a sentinel sidecar that participates in master
+        # election. Quorum 2/3 — tolerates 1 sentinel loss.
+        enabled = true
+        # Failover detection: how long master must be unreachable
+        # before sentinels initiate election. 5000ms is the chart
+        # default — short enough to react to real failure, long
+        # enough to avoid election storms on transient network
+        # blips.
+        downAfterMilliseconds = 5000
+      }
 
       # No AUTH — matches original Phase #5 design. mTLS-mesh provides
       # transport-level auth; full Redis AUTH would add Vault/Secret
@@ -117,19 +154,6 @@ resource "helm_release" "langgraph_redis_ha" {
         }
       }
 
-      # Sentinel: enabled by default at architecture=replication. Each
-      # redis pod runs a sentinel sidecar that participates in master
-      # election. Quorum 2/3 — tolerates 1 sentinel loss.
-      sentinel = {
-        enabled = true
-        # Failover detection: how long master must be unreachable
-        # before sentinels initiate election. 5000ms is the chart
-        # default — short enough to react to real failure, long
-        # enough to avoid election storms on transient network
-        # blips.
-        downAfterMilliseconds = 5000
-      }
-
       # Chart's PodDisruptionBudget — minAvailable=2 so voluntary
       # disruptions (drains, chart upgrades) can't drop quorum.
       pdb = {
@@ -141,6 +165,12 @@ resource "helm_release" "langgraph_redis_ha" {
       # observability story Phase #67 + #68 + #69 set up.
       metrics = {
         enabled = true
+        # Same bitnamilegacy override for the Prometheus exporter.
+        image = {
+          registry   = "docker.io"
+          repository = "bitnamilegacy/redis-exporter"
+          tag        = "1.66.0-debian-12-r0"
+        }
         serviceMonitor = {
           enabled = true
           # Match label so kube-prometheus-stack picks it up.
