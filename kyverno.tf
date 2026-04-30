@@ -81,6 +81,14 @@ resource "helm_release" "kyverno" {
   chart      = "kyverno"
   version    = "3.3.5"
 
+  # Phase #58 first-attempt 2026-04-30 timed out at default 300s
+  # on the post-upgrade hook (helm waits for new admissionController
+  # pods to reach Ready; with 3 replicas pulling images + CRD
+  # webhook reconcile happening concurrently, 300s wasn't enough
+  # even though pods all became Ready by ~5min). 900s leaves margin
+  # for chart upgrades that scale-up admission pods.
+  timeout = 900
+
   values = [
     yamlencode({
       # Phase #58: admissionController bumped 1 → 3. The original
