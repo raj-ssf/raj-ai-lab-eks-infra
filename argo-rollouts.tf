@@ -43,6 +43,19 @@
 resource "kubernetes_namespace" "argo_rollouts" {
   metadata {
     name = "argo-rollouts"
+    labels = {
+      # Phase #55: meshed for STRICT mTLS. argo-rollouts queries
+      # Prometheus for AnalysisRun gates; with monitoring ns now
+      # meshed, that call needs SPIFFE auth on the source side
+      # too. Sidecar gives the argo-rollouts controller pod a
+      # SPIFFE cert. AuthZ allow_argo_rollouts_to_prometheus in
+      # istio-zero-trust.tf grants the path through.
+      #
+      # The argo-rollouts dashboard pod also gets a sidecar; it
+      # serves only read traffic to the K8s API (no mesh egress
+      # other than its own rollouts API queries to istiod).
+      "istio-injection" = "enabled"
+    }
   }
 }
 

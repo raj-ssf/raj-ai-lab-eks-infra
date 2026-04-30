@@ -1,6 +1,20 @@
 resource "kubernetes_namespace" "monitoring" {
   metadata {
     name = "monitoring"
+    labels = {
+      # Phase #55: meshed for STRICT mTLS. Without the sidecar,
+      # Prometheus's HTTP scrape requests to meshed targets carry
+      # no SPIFFE identity → would fail at the destination Envoy
+      # under STRICT mode. Sidecar gives prometheus a SPIFFE cert
+      # so it can scrape any meshed /metrics over mTLS.
+      #
+      # Same logic for tempo, alertmanager, grafana — all in this
+      # namespace. After this label, Istio's mutating webhook
+      # injects istio-proxy on next pod create. Existing pods
+      # need a manual rollout (kubectl -n monitoring rollout
+      # restart deployment,statefulset) to pick up the sidecar.
+      "istio-injection" = "enabled"
+    }
   }
 }
 

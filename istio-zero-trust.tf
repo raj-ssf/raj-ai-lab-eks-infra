@@ -30,34 +30,30 @@
 # Things that still won't work after this layer (known limitations,
 # tracked as follow-up milestones):
 #
-#   * Prometheus scraping → meshed workloads. monitoring ns is unmeshed,
-#     so prometheus's HTTP scrape requests have no SPIFFE identity and
-#     match no allow rule. Mitigations: mesh monitoring ns (best), or
-#     add ipBlock-based allow rules (brittle), or expose /metrics on a
-#     separate sidecar-bypassed port. Deferred.
-#
 #   * Workloads in unmeshed namespaces (kyverno, vault, mount-s3, etc.)
-#     calling meshed workloads — same plaintext-no-identity problem.
-#     Generally these flows go the OTHER direction (meshed pods call
-#     out to vault/kyverno admission webhooks), which isn't blocked by
-#     destination-side AuthorizationPolicy.
+#     calling meshed workloads — plaintext-no-identity problem under
+#     STRICT mTLS. Generally these flows go the OTHER direction
+#     (meshed pods call out to vault/kyverno admission webhooks),
+#     which isn't blocked by destination-side AuthorizationPolicy.
+#     If a future workload in those namespaces needs to call into the
+#     mesh, the choices are: (a) mesh that namespace too, OR (b) keep
+#     it unmeshed and use a per-port PERMISSIVE PeerAuthentication
+#     override on the destination workload's specific port (carved
+#     exemption — narrows the trust boundary instead of widening it).
 #
 #   * Kubelet probes — handled by Istio's rewriteAppHTTPProbes feature
 #     (default true) which routes probes through the sidecar with
 #     metadata that bypasses mTLS.
 #
-#   * argo-rollouts (argo-rollouts ns) → prometheus (monitoring ns)
-#     for AnalysisRun queries. Confirmed working 2026-04-29 via direct
-#     curl — both namespaces are unmeshed (argo-rollouts deliberately
-#     so per argo-rollouts.tf, monitoring per the unmeshed-by-default
-#     pattern), so the request is plain Kubernetes networking and
-#     Istio AuthZ doesn't apply. NO AuthorizationPolicy is needed for
-#     this path today. If monitoring is ever flipped to meshed (the
-#     "best" mitigation noted above for prometheus scraping),
-#     argo-rollouts AnalysisRun queries WILL break and an allow_argo_
-#     rollouts_to_prometheus rule will need to be added — preferably
-#     gated to source SA argo-rollouts/argo-rollouts-controller and
-#     paths /api/v1/query, /api/v1/query_range only.
+# Resolved by Phase #55:
+#   * Prometheus scraping → meshed workloads — monitoring ns is now
+#     meshed, prometheus has a SPIFFE cert, allow_prometheus_scrape_
+#     meshwide grants /metrics + /stats/prometheus across the mesh.
+#   * argo-rollouts → prometheus — argo-rollouts ns is now meshed,
+#     allow_argo_rollouts_to_prometheus grants /api/v1/query +
+#     /api/v1/query_range to argo-rollouts SA.
+#   * App trace ingestion to tempo — allow_apps_to_tempo grants the
+#     four app SAs into tempo's pod in monitoring ns.
 
 # =============================================================================
 # Removed 2026-04-28 (post-Gateway-API cleanup):
@@ -158,6 +154,14 @@ locals {
     "rag",
     "langfuse",
     "langgraph",
+    # Phase #55: monitoring and argo-rollouts now meshed (see
+    # their namespace labels in prometheus-stack.tf and
+    # argo-rollouts.tf). Add intra-ns allow so within-namespace
+    # flows (grafana → prometheus, alertmanager → prometheus,
+    # argo-rollouts-controller → argo-rollouts-dashboard) keep
+    # working under STRICT mTLS.
+    "monitoring",
+    "argo-rollouts",
   ])
 }
 
@@ -515,5 +519,238 @@ resource "kubectl_manifest" "allow_eval_to_langgraph" {
   depends_on = [
     helm_release.istiod,
     kubectl_manifest.deny_all_mesh_wide,
+  ]
+}
+
+# =============================================================================
+# Phase #55: mesh-level STRICT mTLS + the AuthZ allow rules required
+# to keep cross-namespace flows working after the flip.
+#
+# Before this phase, mesh PeerAuthentication was at default (PERMISSIVE
+# auto-mTLS). PERMISSIVE means meshed-to-meshed gets mTLS automatically,
+# but meshed workloads also accept plaintext from unmeshed sources. That
+# left a real gap: an attacker landing in any unmeshed ns (kyverno,
+# vault, mountpoint-s3, monitoring, argo-rollouts) could call meshed
+# apps in plaintext and slip past authz that expected SPIFFE principals
+# (the "no principal matches no allow rule" path means deny-by-default,
+# but for non-AuthZ-protected workloads it means open-plaintext).
+#
+# STRICT closes that gap by REJECTING non-mTLS connections at the
+# transport layer, before AuthZ even evaluates. Pre-flip, the lab had
+# to mesh the two unmeshed namespaces that legitimately call meshed
+# workloads: monitoring (prometheus → meshed apps for /metrics scrape)
+# and argo-rollouts (controller → prometheus for AnalysisRun queries).
+# Both are now meshed (see their kubernetes_namespace resources).
+#
+# Rules added below:
+#   allow_prometheus_scrape_meshwide   cluster-scoped allow letting
+#                                      monitoring/kube-prometheus-stack-
+#                                      prometheus SA hit /metrics or
+#                                      /stats/prometheus on any meshed
+#                                      workload, regardless of namespace
+#   allow_argo_rollouts_to_prometheus  argo-rollouts SA → prometheus
+#                                      query API in monitoring ns
+#   allow_apps_to_tempo                meshed apps (langgraph, rag,
+#                                      ingestion, chat-ui) → tempo
+#                                      OTLP gRPC for trace ingestion
+#   mesh_strict_mtls                   the actual flip — PeerAuthentication
+#                                      mode: STRICT in istio-system
+#
+# Order matters: PeerAuthentication.depends_on includes ALL the new
+# allow rules so terraform applies them first. If terraform-apply is
+# interrupted mid-phase, having allows-without-strict is safe (no
+# behavior change); having strict-without-allows would break scraping
+# and trace ingestion until the next apply.
+# =============================================================================
+
+# Cluster-scoped allow: prometheus can scrape /metrics on every meshed
+# pod. Living in istio-system makes it apply mesh-wide; the empty
+# selector (no spec.selector field) means "all workloads".
+#
+# Path-scoped to /metrics + /stats/prometheus so the rule grants ONLY
+# the scrape capability — not arbitrary HTTP access. If prometheus's
+# SA were ever compromised, the attacker can read metrics from every
+# meshed app (which they could already do via kubectl port-forward
+# anyway, given they hold prometheus's cluster-level kubectl creds);
+# they CANNOT call /invoke or /retrieve or /upload.
+resource "kubectl_manifest" "allow_prometheus_scrape_meshwide" {
+  yaml_body = yamlencode({
+    apiVersion = "security.istio.io/v1"
+    kind       = "AuthorizationPolicy"
+    metadata = {
+      name      = "allow-prometheus-scrape"
+      namespace = "istio-system"
+    }
+    spec = {
+      action = "ALLOW"
+      rules = [
+        {
+          from = [{
+            source = {
+              principals = [
+                "cluster.local/ns/monitoring/sa/kube-prometheus-stack-prometheus",
+              ]
+            }
+          }]
+          to = [{
+            operation = {
+              paths = ["/metrics", "/stats/prometheus"]
+            }
+          }]
+        },
+      ]
+    }
+  })
+
+  depends_on = [
+    helm_release.istiod,
+    kubectl_manifest.deny_all_mesh_wide,
+  ]
+}
+
+# argo-rollouts AnalysisRun queries → kube-prometheus-stack-prometheus
+# /api/v1/query and /api/v1/query_range. Scoped to the controller SA
+# (not the dashboard) since the dashboard reads via K8s API, not direct
+# prometheus calls.
+resource "kubectl_manifest" "allow_argo_rollouts_to_prometheus" {
+  yaml_body = yamlencode({
+    apiVersion = "security.istio.io/v1"
+    kind       = "AuthorizationPolicy"
+    metadata = {
+      name      = "allow-argo-rollouts"
+      namespace = "monitoring"
+    }
+    spec = {
+      selector = {
+        matchLabels = {
+          "app.kubernetes.io/name" = "prometheus"
+        }
+      }
+      action = "ALLOW"
+      rules = [
+        {
+          from = [{
+            source = {
+              principals = [
+                "cluster.local/ns/argo-rollouts/sa/argo-rollouts",
+              ]
+            }
+          }]
+          to = [{
+            operation = {
+              paths = ["/api/v1/query", "/api/v1/query_range"]
+            }
+          }]
+        },
+      ]
+    }
+  })
+
+  depends_on = [
+    helm_release.istiod,
+    kubectl_manifest.deny_all_mesh_wide,
+  ]
+}
+
+# Meshed apps push OTLP traces to tempo on port 4317 (gRPC) and 4318
+# (HTTP). Without this rule, all four service SAs would fail to
+# deliver traces under STRICT mTLS — the cross-ns deny-all would
+# block them.
+#
+# Selector matches the tempo pod label (set by the helm chart). Five
+# source principals listed because each app SA needs its own auth
+# context — Istio doesn't have a "wildcard principals in these
+# namespaces" shortcut.
+resource "kubectl_manifest" "allow_apps_to_tempo" {
+  yaml_body = yamlencode({
+    apiVersion = "security.istio.io/v1"
+    kind       = "AuthorizationPolicy"
+    metadata = {
+      name      = "allow-apps-to-tempo"
+      namespace = "monitoring"
+    }
+    spec = {
+      selector = {
+        matchLabels = {
+          "app.kubernetes.io/name" = "tempo"
+        }
+      }
+      action = "ALLOW"
+      rules = [
+        {
+          from = [{
+            source = {
+              principals = [
+                "cluster.local/ns/langgraph/sa/langgraph-service",
+                "cluster.local/ns/rag/sa/rag-service",
+                "cluster.local/ns/ingestion/sa/ingestion-service",
+                "cluster.local/ns/chat/sa/chat-ui",
+              ]
+            }
+          }]
+        },
+      ]
+    }
+  })
+
+  depends_on = [
+    helm_release.istiod,
+    kubectl_manifest.deny_all_mesh_wide,
+  ]
+}
+
+# THE FLIP: PeerAuthentication mode STRICT in istio-system applies
+# mesh-wide. After this, every meshed workload's inbound listener
+# rejects non-mTLS connections at the transport layer.
+#
+# What still works:
+#   - meshed → meshed:           sidecars present SPIFFE certs
+#                                automatically. Auto-mTLS already
+#                                established this; STRICT just
+#                                makes it mandatory.
+#   - kubelet probes:            Istio's rewriteAppHTTPProbes
+#                                feature routes probes through the
+#                                sidecar with metadata that bypasses
+#                                mTLS. Default true; no change needed.
+#   - prometheus scraping:       allow_prometheus_scrape_meshwide
+#                                above lets scrape calls through.
+#                                Prometheus is now meshed so its
+#                                source side has a SPIFFE cert.
+#   - argo-rollouts queries:     allow_argo_rollouts_to_prometheus
+#                                above. argo-rollouts is now meshed.
+#   - app trace ingestion:       allow_apps_to_tempo above.
+#
+# What breaks:
+#   - any unmeshed pod (kyverno, vault, mountpoint-s3, etc.) trying
+#     to call a meshed app. None of those flows exist today (vault
+#     and kyverno are CALLED BY meshed apps, never the reverse), so
+#     this is the intended outcome.
+#
+# Recovery: if STRICT breaks something unexpectedly, set mode:
+# PERMISSIVE in this resource and `terraform apply` reverts the
+# mesh to its pre-Phase-#55 behavior. depends_on chain ensures
+# this resource always applies LAST in a fresh-apply ordering.
+resource "kubectl_manifest" "mesh_strict_mtls" {
+  yaml_body = yamlencode({
+    apiVersion = "security.istio.io/v1"
+    kind       = "PeerAuthentication"
+    metadata = {
+      name      = "default"
+      namespace = "istio-system"
+    }
+    spec = {
+      mtls = {
+        mode = "STRICT"
+      }
+    }
+  })
+
+  depends_on = [
+    helm_release.istiod,
+    kubectl_manifest.deny_all_mesh_wide,
+    kubectl_manifest.allow_prometheus_scrape_meshwide,
+    kubectl_manifest.allow_argo_rollouts_to_prometheus,
+    kubectl_manifest.allow_apps_to_tempo,
+    kubectl_manifest.allow_intra_namespace,
   ]
 }
