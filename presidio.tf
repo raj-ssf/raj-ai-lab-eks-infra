@@ -136,22 +136,32 @@ resource "kubernetes_deployment_v1" "presidio_analyzer" {
           image_pull_policy = "IfNotPresent"
 
           port {
-            container_port = 5001
+            # Microsoft's image listens on 3000 (verified by the
+            # Werkzeug startup log on first apply: "Running on
+            # http://0.0.0.0:3000"). Older docs reference 5001/5002
+            # — those are community-deployment Service ports, not the
+            # container's listen port. Keeping our SERVICE ports at
+            # 5001/5002 (callers see them as before); only the
+            # targetPort routes to 3000.
+            container_port = 3000
             name           = "http"
             protocol       = "TCP"
           }
 
           # CPU-bound: spaCy NER inference. Baseline ~200m, spike to
-          # 500m on burst. Memory holds the en_core_web_lg model
-          # (~500MB).
+          # 500m on burst. Memory holds the en_core_web_lg model:
+          # actual resident-set ~942Mi observed on first apply, so
+          # 1Gi limit was insufficient (kept getting OOM-killed). 2Gi
+          # gives margin for inference burst on long inputs +
+          # gunicorn's per-worker copy.
           resources {
             requests = {
               cpu    = "200m"
-              memory = "512Mi"
+              memory = "1Gi"
             }
             limits = {
               cpu    = "1000m"
-              memory = "1Gi"
+              memory = "2Gi"
             }
           }
 
@@ -254,7 +264,9 @@ resource "kubernetes_deployment_v1" "presidio_anonymizer" {
           image_pull_policy = "IfNotPresent"
 
           port {
-            container_port = 5001 # default port; exposed as Service :5002
+            # Same port-3000 reality as the analyzer. Service maps
+            # 5002 → 3000 via named port.
+            container_port = 3000
             name           = "http"
             protocol       = "TCP"
           }
