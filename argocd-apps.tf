@@ -496,16 +496,37 @@ resource "kubectl_manifest" "chat_ui_app" {
         server    = "https://kubernetes.default.svc"
         namespace = "chat"
       }
-      # Phase #40: blueGreen strategy. argo-rollouts mutates the
-      # selector on BOTH the activeService (chat-ui) and the
-      # previewService (chat-ui-preview) at promote time. selfHeal
-      # would yank both back to the bare app=chat-ui selector and
-      # break the blueGreen split.
+      # Phase #45: canary strategy (was blueGreen in #40). The
+      # ignoreDifferences set changed shape:
+      #
+      # Was (blueGreen):
+      #   Service chat-ui          /spec/selector  (activeService)
+      #   Service chat-ui-preview  /spec/selector  (previewService)
+      #
+      # Now (canary):
+      #   VirtualService chat-ui-canary-vs route weights (mutated by
+      #     argo-rollouts at each setWeight step)
+      #   Service chat-ui-stable, /spec/selector
+      #   Service chat-ui-canary, /spec/selector
+      #
+      # The apex `chat-ui` Service is no longer mutated by argo-
+      # rollouts in canary mode — its selector stays at bare
+      # app=chat-ui and routes to all chat-ui pods. The VS does the
+      # actual traffic-weighting.
       ignoreDifferences = [
+        {
+          group = "networking.istio.io"
+          kind  = "VirtualService"
+          name  = "chat-ui-canary-vs"
+          jsonPointers = [
+            "/spec/http/0/route/0/weight",
+            "/spec/http/0/route/1/weight",
+          ]
+        },
         {
           group = ""
           kind  = "Service"
-          name  = "chat-ui"
+          name  = "chat-ui-stable"
           jsonPointers = [
             "/spec/selector",
           ]
@@ -513,7 +534,7 @@ resource "kubectl_manifest" "chat_ui_app" {
         {
           group = ""
           kind  = "Service"
-          name  = "chat-ui-preview"
+          name  = "chat-ui-canary"
           jsonPointers = [
             "/spec/selector",
           ]
