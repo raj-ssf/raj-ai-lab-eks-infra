@@ -331,3 +331,62 @@ resource "kubectl_manifest" "qdrant_authz_policy" {
     kubectl_manifest.qdrant_peer_auth_strict,
   ]
 }
+
+# =============================================================================
+# Phase #76: AuthZ allow for qdrant cluster intra-pod traffic.
+#
+# Qdrant 1 → 3 with cluster mode (Phase #76 in raj-ai-lab-eks gitops
+# repo) needs each qdrant-N pod to reach every other qdrant-N pod on
+# port 6335 (P2P Raft consensus + data replication). The two existing
+# AuthorizationPolicies in qdrant ns (allow-rag-service-only +
+# allow-ingestion-service) only allow rag-service and ingestion-
+# service principals → no rule covered qdrant→qdrant intra-cluster
+# calls, so STRICT mTLS rejected them with "RBAC: access denied"
+# wrapped as a transport error.
+#
+# Symptom on first apply of #76: qdrant-1 / qdrant-2 panicked at
+# startup with:
+#   ERROR qdrant::startup: Panic occurred ... Can't initialize
+#     consensus: Failed to initialize Consensus for new Raft state:
+#     Failed to add peer to known: status: Unknown, message:
+#     "transport error"
+#
+# Fix: this policy. Allows the qdrant pods' own principal (default
+# SA in the qdrant namespace) to call into qdrant pods. Combined
+# with the existing allow-rag-service-only and allow-ingestion-
+# service policies (Istio AuthZ rules are OR'd — any matching ALLOW
+# admits the request), this restores cluster peer-mesh without
+# loosening the public-API enforcement.
+#
+# Principal: cluster.local/ns/qdrant/sa/default — the qdrant
+# StatefulSet pods don't have a dedicated ServiceAccount today, so
+# they run as the namespace's `default` SA. Phase #76b candidate:
+# create `qdrant` ServiceAccount and update statefulset.yaml to use
+# it; tighten this principal accordingly.
+# =============================================================================
+
+resource "kubectl_manifest" "qdrant_intra_cluster_authz" {
+  yaml_body = yamlencode({
+    apiVersion = "security.istio.io/v1"
+    kind       = "AuthorizationPolicy"
+    metadata = {
+      name      = "allow-qdrant-cluster"
+      namespace = "qdrant"
+    }
+    spec = {
+      action = "ALLOW"
+      rules = [{
+        from = [{
+          source = {
+            principals = ["cluster.local/ns/qdrant/sa/default"]
+          }
+        }]
+      }]
+    }
+  })
+
+  depends_on = [
+    helm_release.istiod,
+    kubectl_manifest.qdrant_peer_auth_strict,
+  ]
+}
