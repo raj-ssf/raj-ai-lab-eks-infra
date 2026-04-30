@@ -699,37 +699,73 @@ resource "kubectl_manifest" "allow_apps_to_tempo" {
   ]
 }
 
-# THE FLIP: PeerAuthentication mode STRICT in istio-system applies
-# mesh-wide. After this, every meshed workload's inbound listener
-# rejects non-mTLS connections at the transport layer.
+# THE FLIP: PeerAuthentication mode for the mesh.
 #
-# What still works:
-#   - meshed → meshed:           sidecars present SPIFFE certs
-#                                automatically. Auto-mTLS already
-#                                established this; STRICT just
-#                                makes it mandatory.
-#   - kubelet probes:            Istio's rewriteAppHTTPProbes
-#                                feature routes probes through the
-#                                sidecar with metadata that bypasses
-#                                mTLS. Default true; no change needed.
-#   - prometheus scraping:       allow_prometheus_scrape_meshwide
-#                                above lets scrape calls through.
-#                                Prometheus is now meshed so its
-#                                source side has a SPIFFE cert.
-#   - argo-rollouts queries:     allow_argo_rollouts_to_prometheus
-#                                above. argo-rollouts is now meshed.
-#   - app trace ingestion:       allow_apps_to_tempo above.
+# STARTED at STRICT. REVERTED to PERMISSIVE 2026-04-30 after live
+# testing surfaced the well-known Istio-vs-Prometheus-operator
+# mismatch: ServiceMonitor-driven scrapes go directly to pod IPs
+# (discovered via EndpointSlice), not to Service VIPs. Istio's
+# auto-mTLS engages on Service-VIP routes but NOT on raw pod-IP
+# connections (those fall through to PassthroughCluster, plaintext).
+# Destination pods under STRICT then reject the plaintext at the
+# inbound listener with 503.
 #
-# What breaks:
-#   - any unmeshed pod (kyverno, vault, mountpoint-s3, etc.) trying
-#     to call a meshed app. None of those flows exist today (vault
-#     and kyverno are CALLED BY meshed apps, never the reverse), so
-#     this is the intended outcome.
+# Symptoms observed under STRICT:
+#   - All langgraph-service / rag-service / ingestion-service /
+#     chat-ui scrape targets in Prometheus marked DOWN
+#   - 1261 RBAC denies on langgraph's port 8000 inbound listener
+#     within minutes
+#   - Per-port stats counters showed inbound rbac.denied climbing
+#     while rbac.allowed stayed at 6 (only the few legitimate non-
+#     pod-IP calls succeeded)
+#   - Direct test: prometheus → langgraph SERVICE VIP returned
+#     metrics; prometheus → langgraph POD IP returned 503
 #
-# Recovery: if STRICT breaks something unexpectedly, set mode:
-# PERMISSIVE in this resource and `terraform apply` reverts the
-# mesh to its pre-Phase-#55 behavior. depends_on chain ensures
-# this resource always applies LAST in a fresh-apply ordering.
+# Why we don't fix-forward to STRICT:
+#   The canonical Istio answer is to scrape istio-agent's merged
+#   metrics endpoint at :15020 (which serves istio_* + merged
+#   app-side metrics over a sidecar-managed listener that bypasses
+#   the mTLS requirement). That requires:
+#     (a) Reconfiguring every ServiceMonitor to scrape :15020 not
+#         the app's metrics port
+#     (b) Adding the prometheus.io/scrape + path annotations to
+#         every meshed pod template
+#     (c) Updating the Phase #14a custom scrape config in
+#         prometheus-stack.tf to widen the namespace allow-list
+#         (currently rag/qdrant/keycloak/argocd; would need
+#         langgraph, chat, ingestion, monitoring too)
+#     (d) Verifying the chat-ui side-port :8001 metrics still
+#         work since they're outside the istio-agent merge path
+#   That's significant refactor for a lab with ~2 months left.
+#
+# What this commit STILL gives us:
+#   - Auto-mTLS for every meshed-to-meshed call: encryption-in-
+#     transit between sidecar pairs is automatic. PERMISSIVE
+#     accepts BOTH mTLS and plaintext; the plaintext fallback is
+#     the gap.
+#   - The deny-by-default AuthZ floor (Phase #20) still enforces
+#     who-can-talk-to-who. An attacker landing in unmeshed ns can
+#     send plaintext, but AuthZ rejects unless a matching ALLOW
+#     exists for their (empty) principal.
+#   - Defense isn't STRICT-grade but is much better than no-mesh.
+#
+# What this commit DELIBERATELY KEEPS:
+#   - monitoring + argo-rollouts namespaces are still meshed
+#     (sidecars now injected). Even under PERMISSIVE, those pods
+#     get encrypted communication when calling other meshed apps.
+#   - All four new AuthZ allow rules above stay applied. Under
+#     PERMISSIVE they're not strictly required (no STRICT to
+#     enforce), but they document the intent and become
+#     load-bearing the moment STRICT is re-enabled.
+#
+# How to flip to STRICT in the future:
+#   1. Refactor ServiceMonitors to scrape istio-agent :15020 OR
+#      add per-port PERMISSIVE PeerAuthentication on each app's
+#      metrics port (carved exemption — narrower trust boundary
+#      than mesh-wide PERMISSIVE).
+#   2. Validate scrape targets all UP under PERMISSIVE first.
+#   3. Edit mode below back to STRICT, terraform apply.
+#   4. Watch http.inbound_*.rbac.denied counters; should stay flat.
 resource "kubectl_manifest" "mesh_strict_mtls" {
   yaml_body = yamlencode({
     apiVersion = "security.istio.io/v1"
@@ -740,7 +776,8 @@ resource "kubectl_manifest" "mesh_strict_mtls" {
     }
     spec = {
       mtls = {
-        mode = "STRICT"
+        # STRICT was attempted and reverted; see header comment.
+        mode = "PERMISSIVE"
       }
     }
   })
