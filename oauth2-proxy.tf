@@ -170,11 +170,44 @@ resource "helm_release" "oauth2_proxy" {
         enabled = false
       }
 
-      # Single replica is fine for the lab. oauth2-proxy is
-      # stateless except for the encrypted cookie, so multi-replica
-      # works without sticky sessions, but the lab's traffic
-      # doesn't justify HA.
-      replicaCount = 1
+      # Phase #63: 1 → 2 replicas. oauth2-proxy is the auth gate
+      # for rollouts.${var.domain} — every request to the Argo
+      # Rollouts dashboard (HTTPRoute → oauth2-proxy → upstream
+      # argo-rollouts-dashboard) flows through this pod. Single-
+      # pod oauth2-proxy means any chart upgrade / OOM / eviction
+      # makes the dashboard unreachable for ~30s.
+      #
+      # Original comment ("multi-replica works without sticky
+      # sessions") was already validation that this bump is safe:
+      # oauth2-proxy state is the encrypted session cookie, which
+      # the client carries on every request. Any oauth2-proxy pod
+      # can decrypt it (cookie-secret is shared via the existingSecret
+      # above). No backend session affinity needed.
+      #
+      # Anti-affinity: preferred (weight 100) on hostname. argo-
+      # rollouts-dashboard, oauth2-proxy and the rollouts controller
+      # already share the argo-rollouts namespace; cross-node spread
+      # of just the 2 oauth2-proxy pods is satisfiable on the 3-node
+      # cluster.
+      replicaCount = 2
+
+      affinity = {
+        podAntiAffinity = {
+          preferredDuringSchedulingIgnoredDuringExecution = [{
+            weight = 100
+            podAffinityTerm = {
+              labelSelector = {
+                matchLabels = {
+                  "app.kubernetes.io/name"      = "oauth2-proxy"
+                  "app.kubernetes.io/instance"  = "oauth2-proxy"
+                  "app.kubernetes.io/component" = "authentication-proxy"
+                }
+              }
+              topologyKey = "kubernetes.io/hostname"
+            }
+          }]
+        }
+      }
 
       resources = {
         requests = {
