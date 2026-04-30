@@ -175,6 +175,98 @@ resource "helm_release" "cert_manager" {
 # K8s API egress).
 # =============================================================================
 
+resource "kubectl_manifest" "cert_manager_cainjector_netpol" {
+  yaml_body = yamlencode({
+    apiVersion = "networking.k8s.io/v1"
+    kind       = "NetworkPolicy"
+    metadata = {
+      name      = "cert-manager-cainjector"
+      namespace = kubernetes_namespace.cert_manager.metadata[0].name
+    }
+    spec = {
+      podSelector = {
+        matchLabels = {
+          "app.kubernetes.io/name"      = "cainjector"
+          "app.kubernetes.io/instance"  = "cert-manager"
+          "app.kubernetes.io/component" = "cainjector"
+        }
+      }
+      policyTypes = ["Ingress", "Egress"]
+
+      # Phase #70d: cainjector NetworkPolicy — smallest scope of the
+      # 3 cert-manager components. cainjector watches CRDs +
+      # ValidatingWebhookConfigurations + MutatingWebhookConfigurations
+      # + APIServices for the cert-manager.io/inject-ca-from
+      # annotation, then patches the .caBundle field with the
+      # referenced Certificate's CA bundle.
+      #
+      # Traffic profile (smaller than webhook + controller):
+      #   Ingress  Just 9402/TCP (metrics). No webhook port, no
+      #            healthcheck server beyond the in-process readiness
+      #            (HTTP probe on the metrics port? actually it's
+      #            controller-runtime's leader-election on K8s API,
+      #            no listening probe). Allowing 9402 for future
+      #            ServiceMonitor wiring.
+      #   Egress   DNS + K8s API (443). No AWS, no ACME.
+      #
+      # Failure mode: cainjector down means new CRDs / Webhook
+      # Configurations referenced via cert-manager.io/inject-ca-from
+      # don't get their .caBundle patched. Existing patched
+      # configurations stay valid (CA is in the manifest). Practical
+      # impact: a new operator install that uses inject-ca-from
+      # admission webhook fails until cainjector recovers. Bounded.
+
+      ingress = [{
+        ports = [
+          { protocol = "TCP", port = 9402 }, # metrics
+        ]
+      }]
+
+      egress = [
+        # --- DNS via CoreDNS -----------------------------------------
+        {
+          to = [{
+            namespaceSelector = {
+              matchLabels = {
+                "kubernetes.io/metadata.name" = "kube-system"
+              }
+            }
+            podSelector = {
+              matchLabels = {
+                "k8s-app" = "kube-dns"
+              }
+            }
+          }]
+          ports = [
+            { protocol = "UDP", port = 53 },
+            { protocol = "TCP", port = 53 },
+          ]
+        },
+
+        # --- K8s API (443/TCP) ---------------------------------------
+        {
+          to = [{
+            ipBlock = {
+              cidr = "0.0.0.0/0"
+              except = [
+                "169.254.169.254/32", # IMDS — defense in depth
+              ]
+            }
+          }]
+          ports = [{
+            protocol = "TCP"
+            port     = 443
+          }]
+        },
+      ]
+    }
+  })
+
+  depends_on = [
+    helm_release.cert_manager,
+  ]
+}
+
 resource "kubectl_manifest" "cert_manager_webhook_netpol" {
   yaml_body = yamlencode({
     apiVersion = "networking.k8s.io/v1"
