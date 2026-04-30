@@ -350,3 +350,223 @@ resource "kubectl_manifest" "karpenter_nodepool_gpu_experiments" {
     kubectl_manifest.karpenter_ec2nc_gpu,
   ]
 }
+
+# =============================================================================
+# Phase #66: General-purpose CPU NodePool.
+#
+# Until this lands, the cluster has 3 static m5.xlarge nodes (one per
+# us-west-2{a,b,c}) and Karpenter only has GPU NodePools. CPU workloads
+# that exceed the static-node capacity have no spawn path:
+#   - Multiple bumps in this session (Phase #59 gateway, Phase #62 vault-
+#     agent-injector) ended up colocating 2 pods on the same node because
+#     no Karpenter NodePool could spawn a second node in their target AZ.
+#   - Phase #59 explicitly flagged Phase #59c (this) as the prerequisite
+#     for the gateway's preferred-anti-affinity actually spreading pods.
+#
+# Design choices:
+#
+# Multi-AZ. Unlike the GPU NodePools (AZ-pinned us-west-2c for vllm
+# model-cache PVC affinity), CPU workloads typically don't care which
+# AZ they land in. Accept all 4 AZs (a/b/c/d) so Karpenter has the
+# widest scheduling space and AWS InsufficientInstanceCapacity in one
+# AZ doesn't block the spawn.
+#
+# No taints. Any pod that doesn't explicitly target the GPU NodePools
+# (i.e., doesn't tolerate nvidia.com/gpu) can land here. This is the
+# default scheduling pool.
+#
+# Spot-preferred capacity mix. Spot pricing is typically 60-90% off
+# on-demand for these instance families. Lab workloads tolerate brief
+# (~2-min) interruption notices for spot reclamation. Workloads that
+# need stability (e.g., StatefulSets with long-running state) can add
+# `karpenter.sh/capacity-type: on-demand` to their nodeSelector or
+# pod spec requirements; Karpenter will honor that and skip spot for
+# those pods.
+#
+# Diverse instance types. Karpenter picks cheapest-that-fits from
+# the allowlist, weighing spot-price + interruption-rate signals. The
+# more types in the list, the better the optimization.
+#   m5/m5a   — Intel/AMD Xeon, common spot capacity
+#   m6a      — AMD EPYC, often cheapest in the m-family
+#   m6i/m7i  — Intel Ice Lake / Sapphire Rapids, newer
+#   c6a/c7a  — AMD compute-optimized for CPU-heavy workloads
+# Sizes capped at 2xlarge (8 vCPU / 32 GiB) — large enough to host
+# realistic workloads, small enough that one runaway scheduler bug
+# can't binpack 32 pods onto one node.
+#
+# 50 GiB gp3 root. Much smaller than the GPU pool's 200 GiB because
+# CPU workloads' images are typically <10 GB. Cuts EBS cost ~75% per
+# spawned node.
+#
+# expireAfter = 7d. Recycle nodes weekly to pick up AMI patches +
+# pod-density rebalancing. Shorter than GPU's 30d because CPU
+# workloads tolerate restart, longer than gpu-experiments' 24h
+# because we want some node stability for log aggregation /
+# cumulative metrics.
+#
+# Hard limit: cpu=64, memory=256Gi. Caps the pool at ~8 m5.xlarge
+# equivalents. Prevents runaway CPU spend if a HPA misconfiguration
+# causes mass pod creation. Adjust upward when steady-state demand
+# exceeds 50% of cap (Karpenter scaling alarms in
+# kube-prometheus-stack would surface that).
+# =============================================================================
+
+resource "kubectl_manifest" "karpenter_ec2nc_general" {
+  yaml_body = yamlencode({
+    apiVersion = "karpenter.k8s.aws/v1"
+    kind       = "EC2NodeClass"
+    metadata = {
+      name = "general"
+    }
+    spec = {
+      # AL2023 STANDARD (no -nvidia suffix) — same EKS-optimized base
+      # but without the pre-baked NVIDIA drivers. ~3 GB smaller AMI,
+      # boots faster. Pods needing GPUs can't run here (no
+      # nvidia-device-plugin) — they'd land on the GPU NodePools.
+      amiFamily = "AL2023"
+      amiSelectorTerms = [
+        {
+          name  = "amazon-eks-node-al2023-x86_64-standard-${var.cluster_version}-*"
+          owner = "602401143452"
+        },
+      ]
+
+      role = module.karpenter.node_iam_role_name
+
+      subnetSelectorTerms = [
+        {
+          tags = {
+            Name = var.private_subnet_name_pattern
+          }
+        },
+      ]
+
+      securityGroupSelectorTerms = [
+        {
+          tags = {
+            "kubernetes.io/cluster/${module.eks.cluster_name}" = "owned"
+          }
+        },
+      ]
+
+      # 50 GiB root — CPU workload images are typically <10 GB
+      # (FastAPI/Django apps, oauth2-proxy, etc.), and the AL2023
+      # base + cri + containerd is ~8 GB. 50 GiB leaves comfortable
+      # headroom for image churn during rolling updates.
+      blockDeviceMappings = [
+        {
+          deviceName = "/dev/xvda"
+          ebs = {
+            volumeSize          = "50Gi"
+            volumeType          = "gp3"
+            encrypted           = true
+            deleteOnTermination = true
+          }
+        },
+      ]
+
+      metadataOptions = {
+        httpEndpoint            = "enabled"
+        httpTokens              = "required"
+        httpPutResponseHopLimit = 2
+      }
+
+      tags = local.common_tags
+    }
+  })
+
+  depends_on = [
+    helm_release.karpenter,
+  ]
+}
+
+resource "kubectl_manifest" "karpenter_nodepool_general" {
+  yaml_body = yamlencode({
+    apiVersion = "karpenter.sh/v1"
+    kind       = "NodePool"
+    metadata = {
+      name = "general"
+    }
+    spec = {
+      template = {
+        metadata = {
+          labels = {
+            workload = "general"
+          }
+        }
+        spec = {
+          nodeClassRef = {
+            group = "karpenter.k8s.aws"
+            kind  = "EC2NodeClass"
+            name  = "general"
+          }
+          # NO taints — this is the default scheduling pool. Any pod
+          # that doesn't explicitly target a GPU NodePool can land
+          # here. To force a workload onto a STATIC node instead
+          # (Vault, kube-system bits), add a nodeSelector matching
+          # the existing static node group's labels.
+          requirements = [
+            {
+              key      = "node.kubernetes.io/instance-type"
+              operator = "In"
+              values = [
+                "m5.large", "m5.xlarge", "m5.2xlarge",
+                "m5a.large", "m5a.xlarge", "m5a.2xlarge",
+                "m6a.large", "m6a.xlarge", "m6a.2xlarge",
+                "m6i.large", "m6i.xlarge", "m6i.2xlarge",
+                "m7i.large", "m7i.xlarge", "m7i.2xlarge",
+                # Compute-optimized (lower memory, higher CPU). Useful
+                # for CPU-bound workloads (proxies, parsers).
+                "c6a.large", "c6a.xlarge", "c6a.2xlarge",
+                "c7a.large", "c7a.xlarge", "c7a.2xlarge",
+              ]
+            },
+            {
+              # Spot + on-demand mix. Karpenter prefers spot when both
+              # are valid (cheaper); workloads that need stability can
+              # add a karpenter.sh/capacity-type: on-demand requirement
+              # to their pod spec to opt out of spot.
+              key      = "karpenter.sh/capacity-type"
+              operator = "In"
+              values   = ["spot", "on-demand"]
+            },
+            {
+              # Multi-AZ. Lab VPC has private subnets in all 4
+              # us-west-2 AZs; CPU workloads are AZ-flexible.
+              key      = "topology.kubernetes.io/zone"
+              operator = "In"
+              values   = ["us-west-2a", "us-west-2b", "us-west-2c", "us-west-2d"]
+            },
+            {
+              key      = "kubernetes.io/arch"
+              operator = "In"
+              values   = ["amd64"]
+            },
+          ]
+          # Recycle weekly. Short enough to pick up AMI patches +
+          # rebalance pod density, long enough that we're not
+          # pointlessly burning compute time on restart cycles.
+          expireAfter = "168h" # 7 days
+        }
+      }
+      # CPU workloads churn more than GPU (rolling updates, scale-
+      # down events). 5-minute consolidation window so brief
+      # scale-down then scale-up doesn't terminate then re-spawn a
+      # node every time.
+      disruption = {
+        consolidationPolicy = "WhenEmptyOrUnderutilized"
+        consolidateAfter    = "5m"
+      }
+      # Cap at ~8 m5.xlarge equivalents. Adjust upward if
+      # steady-state usage approaches 50% of cap.
+      limits = {
+        cpu    = "64"
+        memory = "256Gi"
+      }
+    }
+  })
+
+  depends_on = [
+    kubectl_manifest.karpenter_ec2nc_general,
+  ]
+}
