@@ -268,17 +268,18 @@ resource "helm_release" "kube_prometheus_stack" {
       alertmanager = {
         enabled = true
         alertmanagerSpec = {
-          # Phase #57: 1 → 2 for HA. The kube-prometheus-stack chart
-          # auto-configures peer mesh between replicas via the
-          # generated --cluster.peer flags (one per replica's stable
-          # FQDN). Peers exchange silences and notifications so a
-          # silenced alert stays silenced even if one replica restarts.
-          # Without HA, alertmanager-pod-OOM = silence-state lost +
-          # alert flood when alerts re-fire on the new pod.
-          # Storage stays empty (no PVC) — silences are still
-          # ephemeral, but at least they survive a single-pod
-          # restart via peer gossip.
-          replicas = 2
+          # Phase #57 attempted replicas=2 for HA (peer-mesh-via-
+          # generated --cluster.peer flags). Helm upgrade hung
+          # indefinitely twice (15+ min) — likely PVC + sidecar +
+          # operator-webhook reconcile deadlock specific to the
+          # kube-prometheus-stack StatefulSet upgrade path under
+          # Phase #55's istio-injection. Reverted 2026-04-30 night
+          # to unblock other infra changes; pick up properly
+          # tomorrow when investigating the deadlock with rested
+          # eyes (likely: temporarily disable mutating webhook
+          # during chart upgrade, OR pre-create alertmanager-1
+          # PVC manually).
+          replicas = 1
           resources = {
             requests = {
               cpu    = "20m"
