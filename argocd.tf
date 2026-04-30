@@ -37,10 +37,10 @@ resource "helm_release" "argocd" {
           # we use that instead of the default argocd-secret so Vault can
           # own the value without fighting the chart for that Secret.
           "oidc.config" = yamlencode({
-            name         = "Keycloak"
-            issuer       = "https://keycloak.${var.domain}/realms/${var.cluster_name}"
-            clientID     = "argocd"
-            clientSecret = "$argocd-oidc-vault:client_secret"
+            name            = "Keycloak"
+            issuer          = "https://keycloak.${var.domain}/realms/${var.cluster_name}"
+            clientID        = "argocd"
+            clientSecret    = "$argocd-oidc-vault:client_secret"
             requestedScopes = ["openid", "profile", "email"]
             requestedIDTokenClaims = {
               groups = { essential = true }
@@ -55,7 +55,7 @@ resource "helm_release" "argocd" {
             g, argocd-admins,  role:admin
             g, argocd-viewers, role:readonly
           EOT
-          scopes = "[groups]"
+          scopes           = "[groups]"
         }
 
         # OIDC client secret is delivered via VSO → argocd-oidc-vault Secret;
@@ -149,5 +149,62 @@ resource "kubectl_manifest" "argocd_httproute" {
 
   depends_on = [
     helm_release.argocd,
+  ]
+}
+
+# =============================================================================
+# Phase #70g: NetworkPolicy for argocd namespace.
+#
+# Same meshed-app pattern as Phase #70f (rag/langgraph/ingestion/
+# chat-ui), with two additions:
+#   1. Gateway-system ingress — argocd-server is exposed externally
+#      via shared-gateway, identical to chat-ui's pattern in #70f.
+#   2. podSelector matches the entire namespace (empty selector)
+#      because argocd has 6 deployments + redis. Per-component
+#      policies would yield ~7 NetworkPolicies for marginal precision
+#      gain over Istio AuthZ's existing per-component allows.
+#
+# Why empty podSelector is acceptable here:
+#   The whole argocd namespace is one logical workload — server,
+#   repo-server, dex, applicationset-controller, notifications-
+#   controller, redis. Treating them as a unit aligns with how
+#   they're managed (single helm release) and the namespace-wide
+#   intra-ns allow already in istio-zero-trust.tf.
+#
+# Egress reuses local.app_common_egress from
+# app-network-policies.tf — DNS, istiod, all meshed namespaces,
+# vault, K8s API. argocd-repo-server's git egress (github.com:443)
+# is covered by the K8s-API rule's 0.0.0.0/0:443 allow.
+# =============================================================================
+
+resource "kubectl_manifest" "argocd_netpol" {
+  yaml_body = yamlencode({
+    apiVersion = "networking.k8s.io/v1"
+    kind       = "NetworkPolicy"
+    metadata = {
+      name      = "argocd"
+      namespace = "argocd"
+    }
+    spec = {
+      podSelector = {} # all pods in argocd ns
+      policyTypes = ["Ingress", "Egress"]
+      # Common-meshed ingress + gateway-system (north-south for
+      # argocd-server). Mirrors chat-ui's pattern in #70f.
+      ingress = concat(local.app_common_ingress, [{
+        from = [{
+          namespaceSelector = {
+            matchLabels = {
+              "kubernetes.io/metadata.name" = "gateway-system"
+            }
+          }
+        }]
+      }])
+      egress = local.app_common_egress
+    }
+  })
+
+  depends_on = [
+    helm_release.argocd,
+    helm_release.istiod,
   ]
 }

@@ -623,3 +623,93 @@ resource "kubectl_manifest" "grafana_httproute" {
     helm_release.kube_prometheus_stack,
   ]
 }
+
+# =============================================================================
+# Phase #70g: NetworkPolicy for monitoring namespace.
+#
+# DIFFERENT shape from the meshed-app pattern in #70f:
+#
+# Egress is BROADER because Prometheus scrapes every meshed AND
+# unmeshed namespace, plus per-node endpoints:
+#   - node-exporter on every node's NIC (port 9100)
+#   - kubelet on every node (10250)
+#   - kube-state-metrics, cert-manager, kyverno, vault, etc.
+#     metrics endpoints across namespaces
+# Tightening egress to "only meshed namespaces" would silently
+# break observability of the system layer (cert-manager, kyverno,
+# vault metrics, node-exporter).
+#
+# Solution: allow egress to ALL namespaces on common scrape ports,
+# plus the standard meshed-app destinations. NOT a wide-open allow
+# (some ports stay closed — defense against a Prometheus exploit
+# attempting arbitrary connections), but wide enough to scrape.
+#
+# Ingress: meshed namespaces + gateway-system (Grafana is exposed
+# externally at grafana.${var.domain}). Same pattern as chat-ui +
+# argocd.
+#
+# podSelector empty (matches all pods in monitoring ns) for the
+# same reason as argocd: prometheus + alertmanager + grafana +
+# tempo + kube-state-metrics + prometheus-operator all share the
+# same logical workload boundary, and the helm release manages
+# them as a unit.
+# =============================================================================
+
+resource "kubectl_manifest" "monitoring_netpol" {
+  yaml_body = yamlencode({
+    apiVersion = "networking.k8s.io/v1"
+    kind       = "NetworkPolicy"
+    metadata = {
+      name      = "monitoring"
+      namespace = "monitoring"
+    }
+    spec = {
+      podSelector = {}
+      policyTypes = ["Ingress", "Egress"]
+
+      # --- Ingress: meshed + gateway-system ---
+      ingress = concat(local.app_common_ingress, [{
+        from = [{
+          namespaceSelector = {
+            matchLabels = {
+              "kubernetes.io/metadata.name" = "gateway-system"
+            }
+          }
+        }]
+      }])
+
+      # --- Egress: app_common_egress + scrape-specific allows ---
+      egress = concat(local.app_common_egress, [
+        # All-namespaces scrape: common Prometheus scrape ports.
+        # The list is EXPLICIT (not just "any port everywhere") so
+        # a future Prometheus exploit attempting connections on
+        # arbitrary ports (e.g., postgres, redis) gets blocked at
+        # L3.
+        {
+          to = [{
+            namespaceSelector = {} # all namespaces, including unmeshed
+          }]
+          ports = [
+            { protocol = "TCP", port = 9100 },  # node-exporter
+            { protocol = "TCP", port = 10250 }, # kubelet
+            { protocol = "TCP", port = 10257 }, # kube-controller-manager
+            { protocol = "TCP", port = 10259 }, # kube-scheduler
+            { protocol = "TCP", port = 9402 },  # cert-manager
+            { protocol = "TCP", port = 9090 },  # prometheus self
+            { protocol = "TCP", port = 8080 },  # kube-state-metrics, others
+            { protocol = "TCP", port = 8443 },  # vault, other TLS-metrics
+            { protocol = "TCP", port = 15090 }, # istio-proxy sidecar metrics
+            { protocol = "TCP", port = 15014 }, # istiod control-plane metrics
+            { protocol = "TCP", port = 15020 }, # istio-agent merged metrics
+            # Add new scrape ports here as ServiceMonitors are added.
+          ]
+        },
+      ])
+    }
+  })
+
+  depends_on = [
+    helm_release.kube_prometheus_stack,
+    helm_release.istiod,
+  ]
+}
