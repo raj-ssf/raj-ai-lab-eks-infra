@@ -23,6 +23,51 @@ resource "kubernetes_namespace" "monitoring" {
 # podAnnotations block in the grafana values below, and vault-config.tf
 # for the policy/role/KV entry).
 
+# Phase #58c: Grafana admin Secret managed explicitly by terraform.
+#
+# Background — why this Secret has to exist out-of-band:
+# The grafana subchart's secret.yaml template skips rendering when
+# `env.GF_SECURITY_ADMIN_PASSWORD__FILE` is set (we set that below
+# so Grafana reads its admin password from the Vault-injected file).
+# But the chart's dashboard/datasource reload sidecars
+# (grafana-sc-dashboard, grafana-sc-datasources) ALWAYS reference
+# the admin Secret for their REQ_USERNAME/REQ_PASSWORD env vars —
+# they call back to Grafana's admin API at localhost:3000 to
+# trigger reloads. With the Secret missing, every new pod hangs in
+# CreateContainerConfigError indefinitely (and the helm upgrade
+# blocks waiting for Ready).
+#
+# Discovered when a routine helm upgrade rolled a new grafana pod
+# 2026-04-30: the new pod had been wedged for 10h before being
+# noticed (the OLD pod kept serving because env vars resolve at
+# pod start, so its sidecars cached the value before the Secret
+# was deleted by some earlier reconcile loop).
+#
+# Fix: set `admin.existingSecret = "grafana-admin-credentials"` in
+# the helm values (below), and create the Secret here. Value comes
+# from var.grafana_admin_password — same var feeding the Vault KV
+# entry (vault-config.tf:99), so the sidecar's REQ_PASSWORD matches
+# Grafana's runtime password and admin-API auth succeeds.
+#
+# Why not flip `assertNoLeakedSecrets: false`: that doesn't change
+# whether the chart renders the Secret — the gate is the
+# GF_SECURITY_ADMIN_PASSWORD__FILE env, not assertNoLeakedSecrets.
+# So the only paths are (a) drop GF_*_FILE and lose Vault, or (b)
+# explicitly manage the Secret. (b) wins.
+resource "kubernetes_secret_v1" "grafana_admin_credentials" {
+  metadata {
+    name      = "grafana-admin-credentials"
+    namespace = kubernetes_namespace.monitoring.metadata[0].name
+  }
+
+  data = {
+    "admin-user"     = "admin"
+    "admin-password" = var.grafana_admin_password
+  }
+
+  type = "Opaque"
+}
+
 resource "helm_release" "kube_prometheus_stack" {
   name       = "kube-prometheus-stack"
   namespace  = kubernetes_namespace.monitoring.metadata[0].name
@@ -128,16 +173,28 @@ resource "helm_release" "kube_prometheus_stack" {
 
       # --- Grafana ---
       grafana = {
-        adminUser = "admin"
-        # adminPassword is still set so the chart creates its admin Secret
-        # (Grafana needs *something* to bootstrap on first boot), but the
-        # effective runtime password comes from GF_SECURITY_ADMIN_PASSWORD__FILE
-        # below, which reads the Vault-injected file and wins over the
-        # plain env var. Rotating the Vault value then rolling the pod
-        # updates the password — except Grafana persists admin creds in
-        # SQLite on first boot, so subsequent rotations need a UI/API
-        # change too. Known Grafana wart; acceptable for a lab.
-        adminPassword = var.grafana_admin_password
+        # Phase #58c: admin credentials come from
+        # kubernetes_secret_v1.grafana_admin_credentials (above).
+        # Keys admin-user / admin-password are the chart's defaults.
+        # Setting existingSecret tells the sidecar containers to
+        # use this Secret for their REQ_USERNAME/REQ_PASSWORD env
+        # vars — see comment block above the Secret resource.
+        admin = {
+          existingSecret = kubernetes_secret_v1.grafana_admin_credentials.metadata[0].name
+          userKey        = "admin-user"
+          passwordKey    = "admin-password"
+        }
+        # adminUser/adminPassword removed: when admin.existingSecret
+        # is set the chart reads from the Secret instead. The
+        # runtime password Grafana enforces still comes from
+        # GF_SECURITY_ADMIN_PASSWORD__FILE (Vault-injected, below);
+        # the Secret value matches because it's sourced from the
+        # same var.grafana_admin_password tfvar that feeds Vault.
+        # Rotating the Vault value then rolling the pod updates
+        # the runtime password, except Grafana persists admin
+        # creds in SQLite on first boot, so subsequent rotations
+        # need a UI/API change too. Known Grafana wart; acceptable
+        # for a lab.
 
         persistence = {
           enabled          = true
@@ -403,11 +460,15 @@ resource "helm_release" "kube_prometheus_stack" {
     vault_kv_secret_v2.grafana_admin,
     vault_kv_secret_v2.grafana_oidc,
     vault_kubernetes_auth_backend_role.grafana,
+    # Phase #58c: admin Secret must exist before pod rolls or the
+    # sidecar containers fail with CreateContainerConfigError. See
+    # comment block on the resource for full background.
+    kubernetes_secret_v1.grafana_admin_credentials,
   ]
 }
 
 output "grafana_admin_password_hint" {
-  value       = "kubectl -n monitoring get secret kube-prometheus-stack-grafana -o jsonpath='{.data.admin-password}' | base64 -d"
+  value       = "kubectl -n monitoring get secret grafana-admin-credentials -o jsonpath='{.data.admin-password}' | base64 -d"
   description = "Command to retrieve the Grafana admin password from the Secret"
 }
 
