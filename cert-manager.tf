@@ -175,6 +175,138 @@ resource "helm_release" "cert_manager" {
 # K8s API egress).
 # =============================================================================
 
+resource "kubectl_manifest" "cert_manager_webhook_netpol" {
+  yaml_body = yamlencode({
+    apiVersion = "networking.k8s.io/v1"
+    kind       = "NetworkPolicy"
+    metadata = {
+      name      = "cert-manager-webhook"
+      namespace = kubernetes_namespace.cert_manager.metadata[0].name
+    }
+    spec = {
+      podSelector = {
+        matchLabels = {
+          "app.kubernetes.io/name"      = "webhook"
+          "app.kubernetes.io/instance"  = "cert-manager"
+          "app.kubernetes.io/component" = "webhook"
+        }
+      }
+      policyTypes = ["Ingress", "Egress"]
+
+      # Phase #70c: cert-manager-webhook NetworkPolicy.
+      #
+      # Higher stakes than #70b — the chart sets failurePolicy=Fail on
+      # both ValidatingWebhookConfiguration + MutatingWebhookConfiguration
+      # for cert-manager. If the webhook pod is unreachable, ALL Cert /
+      # Issuer / ClusterIssuer / Order / Challenge CRUD across the
+      # cluster gets rejected with admission errors until the webhook
+      # comes back.
+      #
+      # Ingress shape (different from #70/#70b):
+      #
+      #   - 10250/TCP (https)        admission-webhook calls from the
+      #                              EKS managed kube-apiserver. Source
+      #                              IPs are the API server's, which
+      #                              live OUTSIDE the cluster's pod
+      #                              network — can't be matched via
+      #                              namespaceSelector. ipBlock-based
+      #                              tightening would need the EKS
+      #                              public/private endpoint IP range,
+      #                              which isn't a documented constant.
+      #                              Allow from anywhere on this port.
+      #                              The webhook does mutual TLS auth
+      #                              with the API server's client cert,
+      #                              so L3 broadness is acceptable —
+      #                              authn happens at L7.
+      #
+      #   - 6080/TCP (healthcheck)   kubelet liveness/readiness probes.
+      #                              kubelet runs on the same node as
+      #                              the pod; AWS VPC CNI evaluates
+      #                              kubelet→pod traffic before
+      #                              NetworkPolicy in most setups, but
+      #                              allowing 6080 explicitly is the
+      #                              unambiguous form. Without this, a
+      #                              CNI behavioral change could cause
+      #                              probes to fail → pod marked
+      #                              Unready → endpoint dropped → API
+      #                              server can't reach webhook → admission
+      #                              storm.
+      #
+      #   - 9402/TCP (metrics)       Prometheus scrape port. No
+      #                              ServiceMonitor today (verified
+      #                              Phase #70b commit) but allowing
+      #                              ingress here means future metric
+      #                              scraping doesn't require another
+      #                              NetworkPolicy edit.
+      #
+      # Egress shape (much smaller than #70/#70b — webhook makes no
+      # AWS API calls, so no Pod Identity Agent rule needed):
+      #
+      #   - DNS (53/UDP+TCP) → CoreDNS for resolving K8s API endpoint
+      #   - K8s API (443/TCP) → for self-reads (its own TLS Secret,
+      #                          other Cert resources for validation)
+      #
+      # Apply path safety: NetworkPolicy applies only to NEW
+      # connections. The current admission-webhook calls from the API
+      # server use long-lived HTTP/2 streams; existing streams keep
+      # flowing during the apply. Failure mode if a rule is wrong:
+      # the next admission call (typically within seconds for an
+      # active cluster) hangs/fails, and Cert CRUD starts breaking.
+      # Watch closely after apply — a quick `kubectl create
+      # certificate ...` test surfaces breakage immediately.
+      ingress = [{
+        ports = [
+          { protocol = "TCP", port = 10250 }, # admission webhook
+          { protocol = "TCP", port = 6080 },  # kubelet probes
+          { protocol = "TCP", port = 9402 },  # metrics
+        ]
+      }]
+
+      egress = [
+        # --- DNS via CoreDNS -----------------------------------------
+        {
+          to = [{
+            namespaceSelector = {
+              matchLabels = {
+                "kubernetes.io/metadata.name" = "kube-system"
+              }
+            }
+            podSelector = {
+              matchLabels = {
+                "k8s-app" = "kube-dns"
+              }
+            }
+          }]
+          ports = [
+            { protocol = "UDP", port = 53 },
+            { protocol = "TCP", port = 53 },
+          ]
+        },
+
+        # --- K8s API (443/TCP) ---------------------------------------
+        {
+          to = [{
+            ipBlock = {
+              cidr = "0.0.0.0/0"
+              except = [
+                "169.254.169.254/32", # IMDS — defense in depth
+              ]
+            }
+          }]
+          ports = [{
+            protocol = "TCP"
+            port     = 443
+          }]
+        },
+      ]
+    }
+  })
+
+  depends_on = [
+    helm_release.cert_manager,
+  ]
+}
+
 resource "kubectl_manifest" "cert_manager_controller_netpol" {
   yaml_body = yamlencode({
     apiVersion = "networking.k8s.io/v1"
