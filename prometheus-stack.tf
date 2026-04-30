@@ -30,6 +30,16 @@ resource "helm_release" "kube_prometheus_stack" {
   chart      = "kube-prometheus-stack"
   version    = "65.5.0"
 
+  # Phase #57: bumped from default 300s. Phase #55 added istio-
+  # injection to monitoring ns, so every recreated pod now pays
+  # ~30s for istio-validation + sidecar init in addition to the
+  # base startup. The chart's StatefulSet upgrades (alertmanager
+  # + prometheus) recreate pods serially with `wait: true`
+  # semantics; full upgrade ≈ 8-10 min wall-clock now. 900s gives
+  # generous margin without blocking the apply forever on a
+  # genuinely stuck upgrade.
+  timeout = 900
+
   values = [
     yamlencode({
       # --- Prometheus ---
