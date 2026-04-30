@@ -80,6 +80,78 @@ resource "helm_release" "argocd" {
         enabled = false
       }
 
+      # Phase #74: argocd-redis → argocd-redis-ha.
+      #
+      # Replaces the single-pod argocd-redis Deployment with a 3-pod
+      # Redis Sentinel StatefulSet + 3-replica HAProxy Deployment.
+      # The argocd chart's `redis-ha` sub-chart wires this transparently:
+      # argocd-server, argocd-repo-server, argocd-application-controller,
+      # argocd-applicationset-controller all auto-detect redis-ha and
+      # connect via argocd-redis-ha-haproxy Service (no manual env
+      # rewiring needed in the consumer pods).
+      #
+      # Topology:
+      #   redis-ha StatefulSet     3 pods (master + 2 replicas + sentinel
+      #                            in each pod for leader election).
+      #                            requiredDuringScheduling anti-affinity
+      #                            on hostname (hardAntiAffinity: true)
+      #                            so Sentinel quorum survives a node
+      #                            failure. Cluster has 3 nodes spread
+      #                            across us-west-2{a,b,c}, so the
+      #                            constraint is satisfiable.
+      #   haproxy Deployment       3 pods. Reads route to any healthy
+      #                            replica; writes route to the current
+      #                            master (Sentinel-elected). Clients
+      #                            (argocd-server etc.) talk to HAProxy
+      #                            on the standard 6379 port — no
+      #                            client-side awareness of master/
+      #                            replica or failover.
+      #
+      # Failover: Sentinel detects master loss within ~5s (down-after-
+      # milliseconds default), elects a replica as new master,
+      # HAProxy reconfigures backends. argocd-server's client
+      # connection re-establishes against the new master with a brief
+      # blip in cache reads.
+      #
+      # Cost: ~3 redis-ha pods × 100Mi memory + ~3 haproxy pods ×
+      # 50Mi memory = ~450Mi cluster-wide. Negligible. Each redis-ha
+      # pod uses an emptyDir (chart default) — no PVC, no EBS cost.
+      # argocd-redis is a CACHE, not a system of record; in-memory
+      # state is fine and the cache rebuilds from the K8s API on
+      # cold start.
+      #
+      # Migration: helm upgrade replaces the existing argocd-redis
+      # Deployment with the redis-ha StatefulSet + HAProxy. argocd-
+      # redis Service flips to point at the haproxy Service. Brief
+      # ~30s window where argocd's API responses are slow (cache
+      # rebuilding) — acceptable.
+      redis = {
+        enabled = false
+      }
+      "redis-ha" = {
+        enabled = true
+        # Chart default replicas=3 — keeping. Sentinel quorum is
+        # 2-of-3, so single-pod failure is tolerated. Single-AZ
+        # failure (since we have 1 node per AZ) takes 1 of 3
+        # pods → still quorum.
+        # haproxy: 3 replicas keeps client connections HA across
+        # node restarts.
+        haproxy = {
+          enabled  = true
+          replicas = 3
+          # Anti-affinity already required by chart default; making
+          # the requirement explicit here for documentation.
+          hardAntiAffinity = true
+        }
+        # Redis pod-level anti-affinity (keep chart default true) —
+        # redis-ha StatefulSet pods MUST land on different nodes,
+        # else losing a node takes down >1 sentinel-quorum member.
+        hardAntiAffinity = true
+        # Persistence: chart default is emptyDir (no PVC). Argocd's
+        # redis is a cache; leaving as ephemeral. The cluster has
+        # gp3 SC available if we ever flip to persistent.
+      }
+
       server = {
         service = { type = "ClusterIP" }
 
