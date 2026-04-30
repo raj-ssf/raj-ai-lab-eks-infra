@@ -192,6 +192,235 @@ output "vault_url_hint" {
 # exposed externally.
 # =============================================================================
 
+# =============================================================================
+# Phase #70e: NetworkPolicies for vault stack.
+#
+# Vault is the highest-stakes component covered by this NetworkPolicy
+# rollout so far. Two policies needed because the vault namespace has
+# two distinct workload shapes:
+#
+#   1. vault server (StatefulSet, 3 pods) — raft peer-mesh on port
+#      8201, HTTP API on 8200 reachable from every Vault-using pod
+#      across ~10 namespaces.
+#   2. vault-agent-injector (Deployment, 2 pods after Phase #62) —
+#      MutatingWebhookConfiguration ingress on 8080 from kube-apiserver.
+#
+# Why this matters: vault is NOT meshed (per istio.tf — raft port
+# 8201 uses its own TLS, double-encryption with Istio mTLS would
+# break). So Istio AuthZ in istio-zero-trust.tf does NOT apply to
+# vault pods. NetworkPolicy is the ONLY L3/L4 control.
+#
+# Pre-flight pod labels confirmed:
+#   server pods    app.kubernetes.io/name=vault
+#                  component=server
+#   injector pods  app.kubernetes.io/name=vault-agent-injector
+#                  component=webhook
+#
+# Pre-flight ports confirmed:
+#   server     8200 (http API), 8201 (https-internal raft),
+#              8202 (http-rep — replication, OSS-pod-template
+#              vestige)
+#   injector   listens 8080, Service maps 443→8080
+# =============================================================================
+
+resource "kubectl_manifest" "vault_server_netpol" {
+  yaml_body = yamlencode({
+    apiVersion = "networking.k8s.io/v1"
+    kind       = "NetworkPolicy"
+    metadata = {
+      name      = "vault-server"
+      namespace = kubernetes_namespace.vault.metadata[0].name
+    }
+    spec = {
+      podSelector = {
+        matchLabels = {
+          "app.kubernetes.io/name" = "vault"
+          "component"              = "server"
+        }
+      }
+      policyTypes = ["Ingress", "Egress"]
+
+      # --- Ingress -------------------------------------------------
+      ingress = [
+        # 8200 (HTTP API) — reachable from every Vault-using pod
+        # across ~10 namespaces (rag, langgraph, ingestion, chat,
+        # langfuse, monitoring/grafana, qdrant, keycloak, argocd,
+        # chat). Enumerating namespaceSelectors would be brittle
+        # — every new app that uses Vault Agent Injector would
+        # require an edit here. Allow from anywhere on 8200; Vault
+        # itself authenticates every API call via K8s SA token
+        # (the kubernetes auth backend). L3 broadness, L7 auth.
+        {
+          ports = [{ protocol = "TCP", port = 8200 }]
+        },
+        # 8201 (raft peer-mesh) — ONLY from other vault server
+        # pods in the same namespace. This is a tight rule:
+        # podSelector matches only the 3 vault-N pods. Kubelet
+        # probes don't go to 8201 (probes hit 8200). External
+        # traffic to 8201 is a misconfiguration to be denied.
+        {
+          from = [{
+            podSelector = {
+              matchLabels = {
+                "app.kubernetes.io/name" = "vault"
+                "component"              = "server"
+              }
+            }
+          }]
+          ports = [
+            { protocol = "TCP", port = 8201 },
+            { protocol = "TCP", port = 8202 }, # http-rep — OSS vestige but allow
+          ]
+        },
+      ]
+
+      # --- Egress --------------------------------------------------
+      egress = [
+        # DNS via CoreDNS
+        {
+          to = [{
+            namespaceSelector = {
+              matchLabels = {
+                "kubernetes.io/metadata.name" = "kube-system"
+              }
+            }
+            podSelector = {
+              matchLabels = {
+                "k8s-app" = "kube-dns"
+              }
+            }
+          }]
+          ports = [
+            { protocol = "UDP", port = 53 },
+            { protocol = "TCP", port = 53 },
+          ]
+        },
+        # 8201 to other vault server pods — raft outbound. Same
+        # podSelector as ingress 8201 above (each vault-N talks to
+        # all others).
+        {
+          to = [{
+            podSelector = {
+              matchLabels = {
+                "app.kubernetes.io/name" = "vault"
+                "component"              = "server"
+              }
+            }
+          }]
+          ports = [
+            { protocol = "TCP", port = 8201 },
+            { protocol = "TCP", port = 8202 },
+          ]
+        },
+        # Pod Identity Agent — Vault uses Pod Identity for AWS KMS
+        # access (auto-unseal). vault.tf wires the iam role +
+        # eks_pod_identity_association.
+        {
+          to = [{
+            ipBlock = {
+              cidr = "169.254.170.23/32"
+            }
+          }]
+          ports = [{
+            protocol = "TCP"
+            port     = 80
+          }]
+        },
+        # 443 outbound — K8s API server + AWS KMS for auto-unseal
+        # (kms.us-west-2.amazonaws.com).
+        {
+          to = [{
+            ipBlock = {
+              cidr = "0.0.0.0/0"
+              except = [
+                "169.254.169.254/32", # IMDS — defense in depth
+              ]
+            }
+          }]
+          ports = [{ protocol = "TCP", port = 443 }]
+        },
+      ]
+    }
+  })
+
+  depends_on = [
+    helm_release.vault,
+  ]
+}
+
+resource "kubectl_manifest" "vault_injector_netpol" {
+  yaml_body = yamlencode({
+    apiVersion = "networking.k8s.io/v1"
+    kind       = "NetworkPolicy"
+    metadata = {
+      name      = "vault-agent-injector"
+      namespace = kubernetes_namespace.vault.metadata[0].name
+    }
+    spec = {
+      podSelector = {
+        matchLabels = {
+          "app.kubernetes.io/name" = "vault-agent-injector"
+          "component"              = "webhook"
+        }
+      }
+      policyTypes = ["Ingress", "Egress"]
+
+      # --- Ingress -------------------------------------------------
+      # 8080 — MutatingWebhookConfiguration calls from kube-apiserver.
+      # Same situation as cert-manager-webhook (Phase #70c): API
+      # server is OUTSIDE the pod network, can't be matched via
+      # namespaceSelector. Allow from anywhere; the webhook does
+      # mTLS auth at L7. Failure mode: failurePolicy=Fail in the
+      # chart, so any wrong rule blocks every pod CREATE annotated
+      # with vault.hashicorp.com/agent-inject=true.
+      ingress = [{
+        ports = [{ protocol = "TCP", port = 8080 }]
+      }]
+
+      # --- Egress --------------------------------------------------
+      # Tiny — DNS + K8s API only. Injector doesn't talk to vault
+      # itself; it ONLY mutates pod specs to add agent sidecars.
+      # The agent sidecars (running in the target pods) talk to
+      # vault, but those are different pods.
+      egress = [
+        {
+          to = [{
+            namespaceSelector = {
+              matchLabels = {
+                "kubernetes.io/metadata.name" = "kube-system"
+              }
+            }
+            podSelector = {
+              matchLabels = {
+                "k8s-app" = "kube-dns"
+              }
+            }
+          }]
+          ports = [
+            { protocol = "UDP", port = 53 },
+            { protocol = "TCP", port = 53 },
+          ]
+        },
+        {
+          to = [{
+            ipBlock = {
+              cidr = "0.0.0.0/0"
+              except = [
+                "169.254.169.254/32", # IMDS — defense in depth
+              ]
+            }
+          }]
+          ports = [{ protocol = "TCP", port = 443 }]
+        },
+      ]
+    }
+  })
+
+  depends_on = [
+    helm_release.vault,
+  ]
+}
+
 resource "kubectl_manifest" "vault_httproute" {
   yaml_body = yamlencode({
     apiVersion = "gateway.networking.k8s.io/v1"
