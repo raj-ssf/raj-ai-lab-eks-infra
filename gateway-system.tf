@@ -370,12 +370,26 @@ resource "null_resource" "gateway_nodeaffinity_patch" {
 # real network-layer change (new subnets, route tables, IGW
 # associations) — not a 1-line replicas bump.
 #
-# Anti-affinity: requires the two pods to land on DIFFERENT nodes
-# within us-west-2a. Cluster has multiple m5.xlarge static nodes in
-# 2a (Karpenter spawns more under load), so this scheduling
-# constraint is satisfiable. If it ever can't be satisfied (single
-# 2a node + Karpenter capacity error) the second pod stays Pending
-# rather than colocate — failure-mode acceptable for the lab.
+# Anti-affinity: PREFER (not require) different nodes. The lab
+# actually has only ONE static node in us-west-2a — discovered
+# during Phase #59's first apply when the new RS pod sat Pending
+# 90s on "0/4 nodes available: 1 didn't match anti-affinity".
+# Karpenter NodePools in this cluster are GPU-only (no general-
+# purpose pool to spawn a second 2a node), so requiredDuring-
+# scheduling was unsatisfiable.
+#
+# preferredDuringSchedulingIgnoredDuringExecution with weight=100
+# makes the scheduler try hard to spread pods across nodes but
+# allow colocation when there's no other choice. Effect today:
+# both pods land on the same node — no node-failure HA — but we
+# DO get pod-failure HA (istio upgrade rollout, OOM, eviction).
+# That's the incremental win this phase delivers.
+#
+# Phase #59c candidate: add a general-purpose Karpenter NodePool
+# (CPU-only, multi-AZ) so the cluster can spawn a second 2a node
+# under load. Then the preferred antiAffinity actually spreads
+# pods across nodes. Until then, "preferred" is honest about the
+# constraint.
 #
 # Persistence: same caveat as the nodeAffinity patch. Istio's
 # gateway controller doesn't continuously reconcile the Deployment,
@@ -388,6 +402,13 @@ resource "null_resource" "gateway_replicas_patch" {
   triggers = {
     replicas    = "2"
     gateway_uid = kubectl_manifest.shared_gateway.uid
+    # Bumped 2026-04-30 (Phase #59 fix): switched anti-affinity from
+    # requiredDuringScheduling to preferredDuringScheduling because
+    # the cluster has only one static us-west-2a node + GPU-only
+    # Karpenter NodePools, so required was unsatisfiable. Trigger
+    # value just needs to be unique-per-config-change; bump when
+    # editing the patch payload below.
+    affinity_mode = "preferred-v1"
   }
 
   provisioner "local-exec" {
@@ -399,13 +420,16 @@ resource "null_resource" "gateway_replicas_patch" {
             "spec": {
               "affinity": {
                 "podAntiAffinity": {
-                  "requiredDuringSchedulingIgnoredDuringExecution": [{
-                    "labelSelector": {
-                      "matchLabels": {
-                        "gateway.networking.k8s.io/gateway-name": "shared-gateway"
-                      }
-                    },
-                    "topologyKey": "kubernetes.io/hostname"
+                  "preferredDuringSchedulingIgnoredDuringExecution": [{
+                    "weight": 100,
+                    "podAffinityTerm": {
+                      "labelSelector": {
+                        "matchLabels": {
+                          "gateway.networking.k8s.io/gateway-name": "shared-gateway"
+                        }
+                      },
+                      "topologyKey": "kubernetes.io/hostname"
+                    }
                   }]
                 }
               }
