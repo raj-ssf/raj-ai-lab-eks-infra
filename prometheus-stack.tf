@@ -258,7 +258,17 @@ resource "helm_release" "kube_prometheus_stack" {
       alertmanager = {
         enabled = true
         alertmanagerSpec = {
-          replicas = 1 # HA at scale needs replicas=2 + a clustering peer config
+          # Phase #57: 1 → 2 for HA. The kube-prometheus-stack chart
+          # auto-configures peer mesh between replicas via the
+          # generated --cluster.peer flags (one per replica's stable
+          # FQDN). Peers exchange silences and notifications so a
+          # silenced alert stays silenced even if one replica restarts.
+          # Without HA, alertmanager-pod-OOM = silence-state lost +
+          # alert flood when alerts re-fire on the new pod.
+          # Storage stays empty (no PVC) — silences are still
+          # ephemeral, but at least they survive a single-pod
+          # restart via peer gossip.
+          replicas = 2
           resources = {
             requests = {
               cpu    = "20m"
