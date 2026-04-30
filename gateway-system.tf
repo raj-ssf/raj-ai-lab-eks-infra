@@ -112,6 +112,15 @@ locals {
       hostnames        = ["hello.${var.domain}", "hello2.${var.domain}"]
       cert_secret_name = "hello-tls-prod"
     }
+    rollouts = {
+      namespace = "argo-rollouts"
+      hostnames = ["rollouts.${var.domain}"]
+      # Phase #38: cert is provisioned in argo-rollouts.tf as a
+      # standalone cert-manager Certificate (NOT in gateway-app-
+      # certs.tf, which is purpose-named for the post-Phase-13
+      # recovered Ingress certs). Same letsencrypt-prod ClusterIssuer.
+      cert_secret_name = "rollouts-tls"
+    }
     keycloak = {
       namespace = "keycloak"
       hostnames = ["keycloak.${var.domain}"]
