@@ -93,3 +93,151 @@ resource "helm_release" "external_dns" {
     helm_release.alb_controller,
   ]
 }
+
+# =============================================================================
+# Phase #70: NetworkPolicy for external-dns (pilot rollout).
+#
+# Lab had 7 NetworkPolicies before this commit, all chart-installed
+# defaults from keycloak + langfuse subcharts. This is the first
+# terraform-authored NetworkPolicy — chosen as the pilot because
+# external-dns has the tightest, most-knowable traffic profile in
+# the cluster:
+#
+#   Ingress:  none expected. external-dns is a controller, not a
+#             service. K8s API events are pulled (informer cache),
+#             not pushed. Default-deny is the right baseline.
+#
+#   Egress:   3 known destinations:
+#             - CoreDNS (port 53) for DNS resolution
+#             - Pod Identity Agent at 169.254.170.23:80 for AWS
+#               credentials (Pod Identity, not IRSA — pod talks to
+#               the per-node agent, not directly to STS)
+#             - Internet:443 for K8s API server (kubernetes.default.
+#               svc resolves to a ClusterIP but the actual API
+#               server is the EKS endpoint URL — so 443 to anywhere)
+#               + Route53 API (route53.amazonaws.com, global)
+#
+# Failure mode if a rule is wrong: external-dns can't update DNS
+# records. Existing certs/HTTPRoutes are unaffected (DNS records
+# already exist), but new HTTPRoutes won't propagate to Route53
+# and cert-manager DNS-01 challenges for new Certificates fail.
+# Surfaces within 1-2 days when a new app is deployed; not a
+# user-facing fast outage. Safe pilot.
+#
+# Why we explicitly block IMDS (169.254.169.254):
+# external-dns uses Pod Identity for AWS creds via the agent at
+# 169.254.170.23, not direct IMDS. Blocking IMDS prevents any
+# future regression where a misconfigured SDK falls back to IMDS
+# and silently picks up the node's IAM role (which may have
+# broader permissions than what we granted external-dns). This
+# is defense-in-depth — IMDSv2 is already enforced at the EC2
+# level (eks.tf metadataOptions), but L3 block is belt-and-
+# suspenders.
+#
+# Phase #70b candidates (incremental rollout, lower-risk first):
+#   cert-manager  similar shape (controller + ACME HTTP egress)
+#   vault         server peer-mesh (raft port 8201) + injector
+#                 mutating-webhook from K8s API
+#   argocd        complex — git egress + webhook + dex OIDC; needs
+#                 careful traffic inventory
+#   apps          (rag/langgraph/ingestion/chat-ui) require Istio-
+#                 coexistence consideration. Istio AuthZ is already
+#                 L7 mTLS-authorized (istio-zero-trust.tf);
+#                 NetworkPolicy adds L3/L4 defense-in-depth.
+# =============================================================================
+
+resource "kubectl_manifest" "external_dns_netpol" {
+  yaml_body = yamlencode({
+    apiVersion = "networking.k8s.io/v1"
+    kind       = "NetworkPolicy"
+    metadata = {
+      name      = "external-dns"
+      namespace = kubernetes_namespace.external_dns.metadata[0].name
+    }
+    spec = {
+      podSelector = {
+        matchLabels = {
+          "app.kubernetes.io/name" = "external-dns"
+        }
+      }
+      policyTypes = ["Ingress", "Egress"]
+
+      # Default-deny ingress: empty list means "no traffic allowed
+      # in." Some K8s versions distinguish between "no ingress key"
+      # and "ingress: []"; declaring the empty array explicitly is
+      # the unambiguous form.
+      ingress = []
+
+      egress = [
+        # --- DNS via CoreDNS (kube-system) ---------------------------
+        # external-dns resolves Route53 endpoints + the EKS API
+        # endpoint via cluster DNS. Without this, Route53 calls fail
+        # with "no such host" — same failure class as the recent
+        # iam.amazonaws.com VPN incident.
+        {
+          to = [{
+            namespaceSelector = {
+              matchLabels = {
+                "kubernetes.io/metadata.name" = "kube-system"
+              }
+            }
+            podSelector = {
+              matchLabels = {
+                "k8s-app" = "kube-dns"
+              }
+            }
+          }]
+          ports = [
+            { protocol = "UDP", port = 53 },
+            { protocol = "TCP", port = 53 },
+          ]
+        },
+
+        # --- Pod Identity Agent (link-local) -------------------------
+        # Pod Identity replaces IRSA on this cluster. The pod talks
+        # to the per-node agent at 169.254.170.23:80 to get scoped
+        # AWS credentials (the agent then talks to STS itself, not
+        # the pod). Without this, every AWS API call fails with "no
+        # valid credentials".
+        {
+          to = [{
+            ipBlock = {
+              cidr = "169.254.170.23/32"
+            }
+          }]
+          ports = [{
+            protocol = "TCP"
+            port     = 80
+          }]
+        },
+
+        # --- HTTPS to internet (K8s API + Route53 + STS) -------------
+        # Two destinations on 443:
+        #  1. EKS API endpoint (kubernetes.default.svc → public DNS
+        #     resolves to a public IP for managed EKS; private when
+        #     enable_private_endpoint=true, which this cluster uses)
+        #  2. Route53 API (global, no regional endpoint)
+        # IMDS endpoint (169.254.169.254) is excepted to prevent any
+        # future SDK regression from falling back to node-level IAM.
+        {
+          to = [{
+            ipBlock = {
+              cidr = "0.0.0.0/0"
+              except = [
+                "169.254.169.254/32", # IMDS — defense in depth
+              ]
+            }
+          }]
+          ports = [{
+            protocol = "TCP"
+            port     = 443
+          }]
+        },
+      ]
+    }
+  })
+
+  depends_on = [
+    helm_release.external_dns,
+  ]
+}
