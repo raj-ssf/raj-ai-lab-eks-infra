@@ -83,16 +83,37 @@ resource "helm_release" "kyverno" {
 
   values = [
     yamlencode({
-      # Single-replica each for lab footprint. Production-sized deployments
-      # run 3 replicas of admission-controller for HA and reduced webhook
-      # timeout risk.
+      # Phase #58: admissionController bumped 1 → 3. The original
+      # comment documented "run 3 replicas for HA and reduced
+      # webhook timeout risk" but the value was never applied —
+      # fixing now.
+      #
+      # Why this is the highest-priority kyverno bump: the admission
+      # controller serves the ValidatingAdmissionWebhook the K8s API
+      # calls on every CREATE/UPDATE pod. Single-pod kyverno =
+      # cluster-wide blast radius. If the one pod OOMs, gets
+      # rescheduled, or has a slow GC pause, EVERY pod creation in
+      # rag/qdrant/keycloak/argocd/llm/langfuse/training/kubeflow
+      # (the namespaces in deny-unverified-images-critical-
+      # namespaces at kyverno-policies-catchall.tf:158) fails until
+      # kyverno is back. With 3 replicas + the K8s Service
+      # round-robin sending webhook requests across all healthy
+      # pods, single-pod failure degrades gracefully — surviving
+      # pods carry the admission load.
       admissionController = {
-        replicas = 1
+        replicas = 3
         resources = {
           requests = { cpu = "100m", memory = "256Mi" }
           limits   = { cpu = "500m", memory = "512Mi" }
         }
       }
+      # background/cleanup/reports controllers stay at 1: they use
+      # leader election, so multi-replica only adds standby cost
+      # without throughput gain. Their failure modes are lower-
+      # impact: gaps in PolicyReport generation (background),
+      # missed CleanupPolicy firings (cleanup), missed report
+      # aggregations (reports). None block live admission. Phase
+      # #58b candidate if standby-failover-time matters.
       backgroundController = {
         replicas = 1
         resources = {
