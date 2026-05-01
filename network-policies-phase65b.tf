@@ -381,3 +381,159 @@ resource "kubectl_manifest" "vault_secrets_operator_netpol" {
 
   depends_on = [helm_release.istiod]
 }
+
+# =============================================================================
+# Phase #65c: system + utility namespaces.
+#
+# Phase #65b's commit deferred these as out-of-scope for that round
+# ("Phase #65c candidate if the cluster's threat model warrants it").
+# Closing the deferral now with the SAFE subset:
+#
+#   default            real workload (hello) — per-app NP, not
+#                      namespace-wide (so ad-hoc operator pods like
+#                      smoke-test alpine, node-debugger continue
+#                      to work)
+#   kube-public        empty namespace — default-deny NP as
+#                      hygiene (catches any future pod misconfig
+#                      that lands here)
+#   kube-node-lease    same
+#   mount-s3           same (csi-driver runs in kube-system, not
+#                      here; mount-s3 is just a placeholder ns)
+#
+# DELIBERATELY SKIPPED: kube-system.
+#   Reasoning: kube-system contains AWS VPC CNI (aws-node DaemonSet),
+#   coredns, kube-proxy, ebs-csi-controller/-node, metrics-server,
+#   alb-controller, karpenter, istio-cni-node, nvidia-device-plugin.
+#   A namespace-wide NP would need to allow:
+#     - kubelet probe ingress (every pod)
+#     - kube-apiserver webhook ingress (alb-controller, metrics-server)
+#     - DNS lookups from every pod in the cluster (coredns)
+#     - kube-proxy iptables setup (host network, NP doesn't even apply)
+#     - aws-node host networking (NP doesn't apply to hostNetwork=true)
+#     - karpenter calls to AWS APIs
+#     - ebs-csi to EBS APIs
+#   The risk-of-breakage from a wrong rule is "cluster pod-creation
+#   stops" or "DNS resolution dies cluster-wide". Per-component NPs
+#   would be safer but represent ~5-10 separate NetworkPolicy
+#   resources, each with risk. Out of scope for tonight.
+#
+#   The mitigating factor: kube-system is owned by EKS-managed addons
+#   (vpc-cni, kube-proxy, coredns, eks-pod-identity-agent, ebs-csi)
+#   which AWS validates against EKS's threat model. Adding our own NP
+#   on top would primarily protect against pod-to-pod lateral movement
+#   FROM other namespaces, but our existing per-namespace NPs already
+#   restrict OUTBOUND to specific kube-system targets (CoreDNS, Pod
+#   Identity Agent). The "lock kube-system internally" gap is real
+#   but bounded.
+# =============================================================================
+
+# --- default (per-app NP for hello) -----------------------------------------
+# Selector targets the hello workload specifically — leaves the rest of
+# `default` ns unprotected so ad-hoc operator pods (kyverno smoke-tests,
+# node-debugger, phase65b-test HTTPRoute) work without NP edits.
+#
+# hello is NOT meshed (default ns has no istio-injection label), so the
+# meshed-namespace ingress pattern doesn't apply. Traffic shape:
+#   Ingress: gateway-system Envoy pods (HTTPRoute target)
+#   Egress:  none in particular (hello is a static-content service)
+resource "kubectl_manifest" "default_hello_netpol" {
+  yaml_body = yamlencode({
+    apiVersion = "networking.k8s.io/v1"
+    kind       = "NetworkPolicy"
+    metadata = {
+      name      = "hello"
+      namespace = "default"
+    }
+    spec = {
+      podSelector = {
+        matchLabels = { app = "hello" }
+      }
+      policyTypes = ["Ingress", "Egress"]
+      ingress = [{
+        from = [{
+          namespaceSelector = {
+            matchLabels = {
+              "kubernetes.io/metadata.name" = "gateway-system"
+            }
+          }
+        }]
+      }]
+      # DNS only — hello's container is nginx serving static content,
+      # no upstream calls needed.
+      egress = [{
+        to = [{
+          namespaceSelector = { matchLabels = { "kubernetes.io/metadata.name" = "kube-system" } }
+          podSelector       = { matchLabels = { "k8s-app" = "kube-dns" } }
+        }]
+        ports = [
+          { protocol = "UDP", port = 53 },
+          { protocol = "TCP", port = 53 },
+        ]
+      }]
+    }
+  })
+}
+
+# --- kube-public (default-deny hygiene) -------------------------------------
+# Empty namespace today. NetworkPolicy with podSelector={} matches all
+# (zero) pods in this namespace — has no effect today, but if/when
+# something lands here by misconfiguration, default-deny catches it.
+resource "kubectl_manifest" "kube_public_netpol" {
+  yaml_body = yamlencode({
+    apiVersion = "networking.k8s.io/v1"
+    kind       = "NetworkPolicy"
+    metadata = {
+      name      = "default-deny"
+      namespace = "kube-public"
+    }
+    spec = {
+      podSelector = {}
+      policyTypes = ["Ingress", "Egress"]
+      # No ingress, no egress — explicit empty arrays. Anything that
+      # lands here is dead in the water until an operator adds rules.
+      ingress = []
+      egress  = []
+    }
+  })
+}
+
+# --- kube-node-lease (default-deny hygiene) ---------------------------------
+resource "kubectl_manifest" "kube_node_lease_netpol" {
+  yaml_body = yamlencode({
+    apiVersion = "networking.k8s.io/v1"
+    kind       = "NetworkPolicy"
+    metadata = {
+      name      = "default-deny"
+      namespace = "kube-node-lease"
+    }
+    spec = {
+      podSelector = {}
+      policyTypes = ["Ingress", "Egress"]
+      ingress     = []
+      egress      = []
+    }
+  })
+}
+
+# --- mount-s3 (default-deny hygiene) ----------------------------------------
+# The aws-mountpoint-s3-csi-driver actually runs in kube-system per
+# AWS's EKS addon convention. mount-s3 ns exists from earlier
+# experimentation but holds no pods today. If/when we ever deploy the
+# csi-driver here directly (vs the addon), remove this NP and write
+# specific rules.
+resource "kubectl_manifest" "mount_s3_netpol" {
+  yaml_body = yamlencode({
+    apiVersion = "networking.k8s.io/v1"
+    kind       = "NetworkPolicy"
+    metadata = {
+      name      = "default-deny"
+      namespace = "mount-s3"
+    }
+    spec = {
+      podSelector = {}
+      policyTypes = ["Ingress", "Egress"]
+      ingress     = []
+      egress      = []
+    }
+  })
+}
