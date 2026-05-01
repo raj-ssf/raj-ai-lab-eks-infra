@@ -90,6 +90,29 @@ resource "helm_release" "prometheus_adapter" {
       # metrics-based HPAs cluster-wide. Same Phase #59-#62 reasoning.
       replicas = 2
 
+      # Phase #80b first-apply discovery: APIService stuck in
+      # FailedDiscoveryCheck with "EOF" from kube-apiserver →
+      # https://<pod-ip>:6443/.../v1beta1. Root cause: the EKS-
+      # managed kube-apiserver lives OUTSIDE the cluster's pod
+      # network and is NOT in the Istio mesh. When it tries to
+      # reach the adapter's API-extension TLS port (6443), the
+      # adapter's istio-proxy sidecar intercepts the connection
+      # and expects an Istio mTLS handshake. kube-apiserver
+      # speaks plain TLS with its own client cert (front-proxy-
+      # ca), so the handshake fails with EOF.
+      #
+      # The fix is to tell Istio to bypass interception for
+      # inbound traffic on 6443. Envoy still handles other ports
+      # (whatever the chart defaults to for metrics/health) but
+      # 6443 traffic flows directly to the adapter container.
+      #
+      # Same pattern would apply to any K8s aggregated-API server
+      # (metrics-server, vault-csi-provider, knative-eventing's
+      # broker-filter) deployed in a meshed namespace.
+      podAnnotations = {
+        "traffic.sidecar.istio.io/excludeInboundPorts" = "6443"
+      }
+
       # Anti-affinity: preferred (Phase #59 lesson — graceful
       # degradation under capacity pressure).
       affinity = {
