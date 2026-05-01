@@ -259,3 +259,71 @@ resource "kubectl_manifest" "chat_ui_netpol" {
 
   depends_on = [helm_release.istiod]
 }
+
+# =============================================================================
+# Phase #65 expansion: qdrant + llm NetworkPolicies (meshed-app pattern).
+#
+# Both namespaces are meshed (istio-injection=enabled). They reuse the
+# app_common_ingress / app_common_egress locals defined at the top of
+# this file. Each is the canonical "high-value workload in a meshed
+# namespace" shape: ingress from any meshed namespace (Istio AuthZ
+# filters L7 access on the destination side via the existing per-pod
+# AuthorizationPolicy resources in istio-zero-trust.tf and
+# istio.tf:qdrant_authz_policy), egress to common destinations
+# (DNS, istiod, all meshed namespaces, vault, K8s API).
+#
+# qdrant:
+#   The vector DB that rag-service queries on every retrieve. Phase
+#   #76 made it a 3-pod Raft cluster with replication_factor=2.
+#   Existing Istio AuthZ allows rag-service + ingestion-service +
+#   intra-cluster qdrant→qdrant; this NetworkPolicy is the L3/L4
+#   defense-in-depth on top.
+#
+# llm:
+#   The vllm-* Deployments (Phase #80c HPA target, Phase #81d student).
+#   eval Jobs (ragas, lm-eval) also run here. Many distinct pods with
+#   different traffic shapes — using namespace-wide selector to cover
+#   them all uniformly. langgraph-service / chat-ui / ingestion-service
+#   call vllm Services from their respective meshed namespaces;
+#   app_common_ingress's `istio-injection=enabled` selector admits all
+#   of them. eval Jobs run IN this namespace so they're admitted by
+#   the intra-namespace allow already in istio-zero-trust.tf.
+# =============================================================================
+
+resource "kubectl_manifest" "qdrant_netpol" {
+  yaml_body = yamlencode({
+    apiVersion = "networking.k8s.io/v1"
+    kind       = "NetworkPolicy"
+    metadata = {
+      name      = "qdrant"
+      namespace = "qdrant"
+    }
+    spec = {
+      podSelector = {} # all pods (qdrant + any future helper pods)
+      policyTypes = ["Ingress", "Egress"]
+      ingress     = local.app_common_ingress
+      egress      = local.app_common_egress
+    }
+  })
+
+  depends_on = [helm_release.istiod]
+}
+
+resource "kubectl_manifest" "llm_netpol" {
+  yaml_body = yamlencode({
+    apiVersion = "networking.k8s.io/v1"
+    kind       = "NetworkPolicy"
+    metadata = {
+      name      = "llm"
+      namespace = "llm"
+    }
+    spec = {
+      podSelector = {} # all pods (vllm-*, eval-pod Jobs)
+      policyTypes = ["Ingress", "Egress"]
+      ingress     = local.app_common_ingress
+      egress      = local.app_common_egress
+    }
+  })
+
+  depends_on = [helm_release.istiod]
+}

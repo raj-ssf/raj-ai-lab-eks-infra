@@ -191,3 +191,153 @@ resource "helm_release" "kyverno" {
     aws_eks_pod_identity_association.kyverno,
   ]
 }
+
+# =============================================================================
+# Phase #65b: NetworkPolicy for kyverno (4 controller pods).
+#
+# kyverno is NOT meshed (it's an admission webhook that the EKS-managed
+# kube-apiserver calls; the API server is outside the mesh, sees no
+# Istio mTLS). So the meshed-app pattern in app-network-policies.tf
+# doesn't apply directly. Different shape here.
+#
+# Highest stakes of all the controller-shape policies in #70b-d/#70e:
+# the chart sets failurePolicy=Fail on:
+#   - kyverno's policy-validating webhook (every Policy/ClusterPolicy
+#     create/update) — minor blast radius
+#   - the deny-unverified-images-* admission webhook (every pod CREATE
+#     in the 8 namespaces in kyverno-policies-catchall.tf:158:
+#     rag, qdrant, keycloak, argocd, llm, langfuse, training, kubeflow)
+#     — MAJOR blast radius. If kyverno-svc:443 is unreachable, EVERY
+#     new pod in those namespaces gets rejected at admission.
+#
+# The 4 kyverno controller pods have different shapes — using a single
+# NetworkPolicy with namespace-wide selector instead of 4 per-component
+# policies. The shared rules are conservative; admission-webhook (the
+# one that matters for cluster correctness) gets enough on top via
+# the 9443 + 443 ingress rules to function. Background/cleanup/reports
+# controllers do mostly egress to K8s API + ECR; the same broad egress
+# rules cover them.
+#
+# Ingress (3 ports):
+#
+#   9443/TCP (admission)    Webhook calls from kube-apiserver.
+#                           Source IPs are EKS control-plane CIDRs,
+#                           outside the cluster's pod network — same
+#                           pattern as cert-manager-webhook (#70c).
+#                           Allow from anywhere; mTLS auth at L7
+#                           via the CA-bundled webhook config.
+#
+#   443/TCP                 cleanup-controller's webhook port (also
+#                           kyverno-svc's exposed port). Same kube-
+#                           apiserver source pattern.
+#
+#   8000/TCP (metrics)      Prometheus scrape. Already in the
+#                           monitoring NP's egress allowlist (Phase
+#                           #70g). Allowing here for completeness.
+#
+# Egress:
+#
+#   53/UDP+TCP → CoreDNS    Standard.
+#   80/TCP → 169.254.170.23  Pod Identity Agent (the controllers
+#                            need AWS creds for Kyverno's image-
+#                            signature verification path that fetches
+#                            cosign artifacts from ECR — Phase #58's
+#                            kyverno-ecr-read IAM policy in this same
+#                            file).
+#   443/TCP → 0.0.0.0/0      K8s API + ECR (cosign signature fetches)
+#     except IMDS            + any future image-registry verification
+#                            sources (rekor, etc.).
+#
+# Smoke test post-apply (CRITICAL — failurePolicy=Fail makes this
+# a fast-fail signal):
+#
+#   kubectl -n default run npol-smoketest --image=alpine \
+#     --restart=Never --rm -i --tty=false -- echo ok
+#
+#   # If admission accepts the pod create, kyverno's webhook is
+#   # reachable. If admission times out with "context deadline
+#   # exceeded" or "connection refused", a NetworkPolicy rule is
+#   # wrong and you should `terraform destroy -target=
+#   # kubectl_manifest.kyverno_netpol` to unblock pod creates
+#   # cluster-wide while you fix it.
+#
+# IMDS exception (169.254.169.254/32) is defense-in-depth same as
+# the controller-shape policies. Pod Identity uses 169.254.170.23,
+# not IMDS.
+# =============================================================================
+
+resource "kubectl_manifest" "kyverno_netpol" {
+  yaml_body = yamlencode({
+    apiVersion = "networking.k8s.io/v1"
+    kind       = "NetworkPolicy"
+    metadata = {
+      name      = "kyverno"
+      namespace = kubernetes_namespace.kyverno.metadata[0].name
+    }
+    spec = {
+      podSelector = {} # all kyverno-* controller pods
+      policyTypes = ["Ingress", "Egress"]
+
+      # --- Ingress: webhook + metrics ports ----------------------------
+      ingress = [{
+        ports = [
+          { protocol = "TCP", port = 9443 }, # admission-controller webhook
+          { protocol = "TCP", port = 443 },  # cleanup-controller webhook
+          { protocol = "TCP", port = 8000 }, # Prometheus metrics
+        ]
+      }]
+
+      # --- Egress ------------------------------------------------------
+      egress = [
+        # DNS via CoreDNS
+        {
+          to = [{
+            namespaceSelector = {
+              matchLabels = {
+                "kubernetes.io/metadata.name" = "kube-system"
+              }
+            }
+            podSelector = {
+              matchLabels = {
+                "k8s-app" = "kube-dns"
+              }
+            }
+          }]
+          ports = [
+            { protocol = "UDP", port = 53 },
+            { protocol = "TCP", port = 53 },
+          ]
+        },
+        # Pod Identity Agent — kyverno-admission-controller calls ECR
+        # for cosign signature artifacts via the IAM role attached
+        # earlier in this file (kyverno_ecr_read).
+        {
+          to = [{
+            ipBlock = {
+              cidr = "169.254.170.23/32"
+            }
+          }]
+          ports = [{ protocol = "TCP", port = 80 }]
+        },
+        # 443 outbound — K8s API + ECR + future signature-verification
+        # backends. Except IMDS (defense-in-depth, force Pod Identity
+        # path).
+        {
+          to = [{
+            ipBlock = {
+              cidr = "0.0.0.0/0"
+              except = [
+                "169.254.169.254/32", # IMDS
+              ]
+            }
+          }]
+          ports = [{ protocol = "TCP", port = 443 }]
+        },
+      ]
+    }
+  })
+
+  depends_on = [
+    helm_release.kyverno,
+  ]
+}
