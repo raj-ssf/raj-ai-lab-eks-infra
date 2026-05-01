@@ -537,3 +537,284 @@ resource "kubectl_manifest" "mount_s3_netpol" {
     }
   })
 }
+
+# =============================================================================
+# Phase #65d: kube-system per-component NetworkPolicies.
+#
+# Earlier (Phase #65c) I deferred kube-system citing risk of namespace-
+# wide NP breaking CNI/DNS/kubelet. Closing the deferral now with the
+# RIGHT pattern: per-component NPs targeting individual workloads
+# rather than a namespace-wide podSelector={}.
+#
+# What's covered (4 components, all pod-network):
+#
+#   coredns                       Highest-stakes: every pod in the
+#                                 cluster calls it for DNS resolution.
+#   metrics-server                K8s API extension (Phase #80b
+#                                 prometheus-adapter sibling pattern)
+#   aws-load-balancer-controller  Admission webhook for Ingress/
+#                                 TargetGroupBinding CRDs
+#   karpenter                     NodePool reconciler + admission
+#                                 webhook for NodePool/EC2NodeClass CRUD
+#
+# What's NOT covered (intentionally):
+#
+#   hostNetwork=true pods         NetworkPolicy doesn't apply. These
+#                                 use the node's network namespace
+#                                 directly. Components: aws-node (VPC
+#                                 CNI), kube-proxy, eks-pod-identity-
+#                                 agent, nvidia-device-plugin (likely),
+#                                 dcgm-exporter (DaemonSet).
+#
+#   Other low-risk components     ebs-csi-controller, ebs-csi-node,
+#                                 s3-csi-controller, s3-csi-node,
+#                                 istio-cni-node. Each calls outbound
+#                                 to AWS APIs (CSI) or has minimal
+#                                 surface (cni-node sets up iptables
+#                                 via host paths, not network). Adding
+#                                 NPs for these would have low security
+#                                 yield + non-trivial maintenance burden
+#                                 (every CSI driver upgrade may change
+#                                 internal port usage).
+#
+# After Phase #65d, kube-system has explicit ingress/egress rules on
+# the 4 components that handle CRITICAL CLUSTER-WIDE TRAFFIC. The
+# uncovered components are either NP-immune (hostNetwork) or low-risk.
+# The "lock kube-system completely" goal is now unachievable as a
+# matter of mechanism (hostNetwork is exempt by K8s design); this is
+# as close as we can get without rewriting the AWS VPC CNI.
+# =============================================================================
+
+# --- coredns ----------------------------------------------------------------
+# Highest-stakes NP in this rollout. EVERY pod in the cluster does
+# DNS lookups against CoreDNS. Wrong rule here = cluster-wide DNS
+# outage = nothing works.
+#
+# Ingress: port 53 (DNS) + 9153 (metrics) from ANYWHERE.
+#   "Anywhere" because pods in any namespace need DNS. The CoreDNS
+#   binary itself rate-limits + filters to A/AAAA/CNAME records for
+#   the cluster zones; the L3 path is intentionally wide.
+# Egress:  53 to 0.0.0.0/0 (CoreDNS forwards to upstream resolver
+#          which on EKS is the VPC DNS server at <VPC CIDR>+2;
+#          allowing 0.0.0.0/0:53 covers that without baking the
+#          VPC CIDR into this resource).
+#          K8s API on 443 for service/endpoint watches.
+resource "kubectl_manifest" "coredns_netpol" {
+  yaml_body = yamlencode({
+    apiVersion = "networking.k8s.io/v1"
+    kind       = "NetworkPolicy"
+    metadata = {
+      name      = "coredns"
+      namespace = "kube-system"
+    }
+    spec = {
+      podSelector = {
+        matchLabels = { "k8s-app" = "kube-dns" }
+      }
+      policyTypes = ["Ingress", "Egress"]
+      ingress = [{
+        ports = [
+          { protocol = "UDP", port = 53 },
+          { protocol = "TCP", port = 53 },
+          { protocol = "TCP", port = 9153 }, # Prometheus metrics
+        ]
+      }]
+      egress = [
+        # Upstream DNS forwarder (VPC DNS resolver). Allowing 0.0.0.0
+        # broadly because the VPC CIDR isn't baked into this resource.
+        # Real production would use ipBlock with the actual VPC CIDR.
+        {
+          to = [{
+            ipBlock = { cidr = "0.0.0.0/0" }
+          }]
+          ports = [
+            { protocol = "UDP", port = 53 },
+            { protocol = "TCP", port = 53 },
+          ]
+        },
+        # K8s API for Service/Endpoint watches (CoreDNS's
+        # `kubernetes` plugin queries the API to populate the
+        # cluster zone)
+        {
+          to = [{
+            ipBlock = {
+              cidr   = "0.0.0.0/0"
+              except = ["169.254.169.254/32"]
+            }
+          }]
+          ports = [{ protocol = "TCP", port = 443 }]
+        },
+      ]
+    }
+  })
+}
+
+# --- metrics-server ---------------------------------------------------------
+# K8s aggregated API server (same shape as prometheus-adapter in
+# Phase #80b). kube-apiserver calls /apis/metrics.k8s.io/v1beta1/...
+# from outside the cluster's pod network.
+#
+# Ingress: 4443 (the metrics-server's TLS-secured aggregated-API
+#          port) from anywhere — kube-apiserver source IP isn't
+#          a documented constant.
+# Egress:  10250/TCP to every node (kubelet's metrics endpoint).
+#          Allowing 0.0.0.0/0:10250 since node CIDRs aren't fixed.
+#          Plus K8s API on 443.
+resource "kubectl_manifest" "metrics_server_netpol" {
+  yaml_body = yamlencode({
+    apiVersion = "networking.k8s.io/v1"
+    kind       = "NetworkPolicy"
+    metadata = {
+      name      = "metrics-server"
+      namespace = "kube-system"
+    }
+    spec = {
+      podSelector = {
+        matchLabels = { "app.kubernetes.io/name" = "metrics-server" }
+      }
+      policyTypes = ["Ingress", "Egress"]
+      ingress = [{
+        ports = [{ protocol = "TCP", port = 4443 }]
+      }]
+      egress = [
+        {
+          to = [{
+            namespaceSelector = { matchLabels = { "kubernetes.io/metadata.name" = "kube-system" } }
+            podSelector       = { matchLabels = { "k8s-app" = "kube-dns" } }
+          }]
+          ports = [
+            { protocol = "UDP", port = 53 },
+            { protocol = "TCP", port = 53 },
+          ]
+        },
+        # 10250 to all node CIDRs — kubelet's resource-metrics endpoint
+        {
+          to = [{
+            ipBlock = {
+              cidr   = "0.0.0.0/0"
+              except = ["169.254.169.254/32"]
+            }
+          }]
+          ports = [{ protocol = "TCP", port = 10250 }]
+        },
+        # K8s API
+        {
+          to = [{
+            ipBlock = {
+              cidr   = "0.0.0.0/0"
+              except = ["169.254.169.254/32"]
+            }
+          }]
+          ports = [{ protocol = "TCP", port = 443 }]
+        },
+      ]
+    }
+  })
+}
+
+# --- aws-load-balancer-controller -------------------------------------------
+# Admission webhook for Ingress + TargetGroupBinding CRDs (and Service
+# annotations). failurePolicy=Fail in the chart's default values.
+#
+# Ingress: 9443 (webhook), 8080 (metrics)
+# Egress:  ELBv2 + EC2 + ACM APIs via Pod Identity + K8s API
+resource "kubectl_manifest" "alb_controller_netpol" {
+  yaml_body = yamlencode({
+    apiVersion = "networking.k8s.io/v1"
+    kind       = "NetworkPolicy"
+    metadata = {
+      name      = "aws-load-balancer-controller"
+      namespace = "kube-system"
+    }
+    spec = {
+      podSelector = {
+        matchLabels = { "app.kubernetes.io/name" = "aws-load-balancer-controller" }
+      }
+      policyTypes = ["Ingress", "Egress"]
+      ingress = [{
+        ports = [
+          { protocol = "TCP", port = 9443 },
+          { protocol = "TCP", port = 8080 },
+        ]
+      }]
+      egress = [
+        {
+          to = [{
+            podSelector = { matchLabels = { "k8s-app" = "kube-dns" } }
+          }]
+          ports = [
+            { protocol = "UDP", port = 53 },
+            { protocol = "TCP", port = 53 },
+          ]
+        },
+        {
+          to    = [{ ipBlock = { cidr = "169.254.170.23/32" } }]
+          ports = [{ protocol = "TCP", port = 80 }]
+        },
+        {
+          to = [{
+            ipBlock = {
+              cidr   = "0.0.0.0/0"
+              except = ["169.254.169.254/32"]
+            }
+          }]
+          ports = [{ protocol = "TCP", port = 443 }]
+        },
+      ]
+    }
+  })
+}
+
+# --- karpenter --------------------------------------------------------------
+# NodePool reconciler + admission webhook for NodePool/EC2NodeClass.
+# Calls AWS EC2 + Pricing APIs to provision nodes.
+#
+# Ingress: 8443 (webhook), 8080 (metrics), 8081 (health)
+# Egress:  EC2 + Pricing APIs via Pod Identity + K8s API
+resource "kubectl_manifest" "karpenter_netpol" {
+  yaml_body = yamlencode({
+    apiVersion = "networking.k8s.io/v1"
+    kind       = "NetworkPolicy"
+    metadata = {
+      name      = "karpenter"
+      namespace = "kube-system"
+    }
+    spec = {
+      podSelector = {
+        matchLabels = { "app.kubernetes.io/name" = "karpenter" }
+      }
+      policyTypes = ["Ingress", "Egress"]
+      ingress = [{
+        ports = [
+          { protocol = "TCP", port = 8443 },
+          { protocol = "TCP", port = 8080 },
+          { protocol = "TCP", port = 8081 },
+        ]
+      }]
+      egress = [
+        {
+          to = [{
+            podSelector = { matchLabels = { "k8s-app" = "kube-dns" } }
+          }]
+          ports = [
+            { protocol = "UDP", port = 53 },
+            { protocol = "TCP", port = 53 },
+          ]
+        },
+        {
+          to    = [{ ipBlock = { cidr = "169.254.170.23/32" } }]
+          ports = [{ protocol = "TCP", port = 80 }]
+        },
+        {
+          to = [{
+            ipBlock = {
+              cidr   = "0.0.0.0/0"
+              except = ["169.254.169.254/32"]
+            }
+          }]
+          ports = [{ protocol = "TCP", port = 443 }]
+        },
+      ]
+    }
+  })
+}
