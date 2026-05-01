@@ -155,7 +155,13 @@ resource "helm_release" "langgraph_redis_ha" {
       }
 
       replica = {
-        replicaCount = 2
+        # Bitnami chart quirk: with sentinel.enabled=true, the chart
+        # uses a SINGLE StatefulSet of equal-rank pods (each runs
+        # redis + sentinel; one is elected master at runtime).
+        # replicaCount here is the TOTAL pod count, not replicas-
+        # in-addition-to-master. Sentinel quorum needs odd ≥3 for
+        # stable election (2 nodes split-brain). Hence: 3.
+        replicaCount = 3
         persistence = {
           enabled      = true
           size         = "1Gi"
@@ -210,7 +216,14 @@ resource "helm_release" "langgraph_redis_ha" {
   ]
 }
 
-output "langgraph_redis_ha_master_endpoint" {
-  value       = "langgraph-redis-ha-master.langgraph.svc.cluster.local:6379"
-  description = "Master Service for langgraph-service to connect to. Sentinel updates this Service's endpoint on failover automatically."
+output "langgraph_redis_ha_endpoint" {
+  value       = "langgraph-redis-ha.langgraph.svc.cluster.local:6379"
+  description = <<-EOT
+    Sentinel-aware Service for langgraph-service to connect to.
+    Bitnami's architecture=replication + sentinel.enabled produces a
+    SINGLE Service (not -master/-replicas split): connections route
+    to the current master automatically. Sentinel listens on
+    port 26379 of the same Service for clients that want
+    Sentinel-protocol awareness.
+  EOT
 }
