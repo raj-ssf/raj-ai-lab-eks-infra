@@ -53,6 +53,36 @@ resource "helm_release" "istio_cni" {
         # Chained mode: inserted after VPC CNI in /etc/cni/net.d.
         chained           = true
         excludeNamespaces = ["kube-system", "istio-system"]
+
+        # Phase #66 + ragas-eval failure 2026-05-01: when Karpenter
+        # spawns a new node, istio-cni-node DaemonSet takes ~30s to
+        # land + configure iptables. CPU workloads pulling small
+        # images (e.g., the ragas-eval Job) get scheduled within
+        # seconds of node-Ready, BEFORE istio-cni has its iptables
+        # redirects in place. The pod's istio-validation init
+        # container retries connections to 127.0.0.6:15002 (istio-
+        # cni pilot-agent IPC) 5 times then exits 126 with:
+        #   "When using Istio CNI, this can occur if a pod is
+        #    scheduled before the node is ready. If installed with
+        #    'cni.repair.deletePods=true', this pod should
+        #    automatically be deleted and retry."
+        #
+        # The repair controller watches for this exact failure
+        # condition (iptables-validation-failed) and auto-deletes
+        # affected pods so kubelet reschedules them — by which point
+        # istio-cni-node is Ready. Adds ~30-60s wall-clock to first
+        # pod-on-fresh-Karpenter-node startup; eliminates the manual
+        # "delete pod and retry" intervention.
+        #
+        # Pre-Phase-#66 this race was invisible because only GPU
+        # pods used Karpenter, and vllm's multi-GB image pull always
+        # outlasted istio-cni's startup. With Phase #66's general-
+        # purpose CPU NodePool, fast-startup pods land on fresh
+        # nodes and hit the race.
+        repair = {
+          enabled    = true
+          deletePods = true
+        }
       }
     })
   ]
