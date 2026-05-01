@@ -658,6 +658,12 @@ resource "kubectl_manifest" "allow_argo_rollouts_to_prometheus" {
     apiVersion = "security.istio.io/v1"
     kind       = "AuthorizationPolicy"
     metadata = {
+      # Renamed effective scope: was argo-rollouts-only (Phase #34),
+      # now serves any non-meshed Prometheus query client. Keeping
+      # the resource name `allow-argo-rollouts` since changing it
+      # mid-flight would force a delete+recreate against the live
+      # rule. The selector + paths are what matter; the name is
+      # historical.
       name      = "allow-argo-rollouts"
       namespace = "monitoring"
     }
@@ -668,15 +674,32 @@ resource "kubectl_manifest" "allow_argo_rollouts_to_prometheus" {
         }
       }
       action = "ALLOW"
+      # Phase #80d follow-up: dropped the principal restriction
+      # for the same reason Phase #55b dropped it on the
+      # `allow-prometheus-scrape` rule. KEDA's prometheus_scaler
+      # (Phase #80d) calls /api/v1/query from an UNMESHED namespace
+      # (keda) so calls carry no SPIFFE principal — the rule's
+      # `from.source.principals` clause never matches and the call
+      # falls through to the mesh-wide deny → 403.
+      #
+      # Symptom seen 2026-05-01 21:18 UTC after Phase #80d apply:
+      #   keda-operator log:
+      #     prometheus query api returned error. status: 403
+      #     response: RBAC: access denied
+      #
+      # Same security tradeoff as Phase #55b: path-only AuthZ
+      # opens /api/v1/query + /api/v1/query_range to ANY source.
+      # The exposed surface is the read-only Prometheus query API
+      # — operational metrics (request rates, latencies, resource
+      # usage). Information disclosure risk is real but bounded.
+      # Production-grade architectural fix would be:
+      #   (a) mesh the keda namespace, OR
+      #   (b) emit Prometheus exposed via a separate PERMISSIVE
+      #       Service for non-meshed clients.
+      # Both are Phase #80f candidates. Path-only is the lab
+      # answer.
       rules = [
         {
-          from = [{
-            source = {
-              principals = [
-                "cluster.local/ns/argo-rollouts/sa/argo-rollouts",
-              ]
-            }
-          }]
           to = [{
             operation = {
               paths = ["/api/v1/query", "/api/v1/query_range"]
