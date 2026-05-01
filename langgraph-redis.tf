@@ -82,6 +82,20 @@ resource "helm_release" "langgraph_redis_ha" {
 
   values = [
     yamlencode({
+      # Bitnami issue #30850 safety check: chart rejects "non-standard"
+      # image registries by default. Our bitnamilegacy/* overrides
+      # (above) trigger this — even though bitnamilegacy IS Bitnami's
+      # own frozen registry of free images. Opt out explicitly.
+      # Despite the name, this doesn't disable any actual security
+      # feature; it just bypasses the registry-pattern match.
+      # Same pattern would apply to any future Bitnami chart in this
+      # lab using bitnamilegacy overrides.
+      global = {
+        security = {
+          allowInsecureImages = true
+        }
+      }
+
       # 1 master + 2 replicas + Sentinel sidecars in each pod.
       architecture = "replication"
 
