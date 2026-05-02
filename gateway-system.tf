@@ -344,6 +344,119 @@ resource "null_resource" "gateway_nodeaffinity_patch" {
 }
 
 # =============================================================================
+# Phase #59: Patch the Istio-created gateway Deployment to run 2
+# replicas instead of the chart default of 1.
+#
+# WHY: shared-gateway-istio is the ingress for everything in the lab
+# — chat.${var.domain}, grafana.${var.domain}, kc.${var.domain},
+# rollouts.${var.domain}, vault.${var.domain}, langfuse.${var.domain},
+# argocd.${var.domain}. A single-pod gateway means that ANY restart
+# (rolling update from istio upgrade, OOM, node drain, eviction)
+# drops external traffic to the entire lab for ~10-30s while the
+# replacement pod becomes Ready. With 2 pods + NLB target-group
+# round-robin, the surviving pod carries traffic during the rollout.
+#
+# AZ-FAILURE LIMITATION (out of scope for this phase):
+# The lab VPC has only one Public-tagged subnet (us-west-2a). NLBs
+# only forward to targets in the AZs where they have subnets, so
+# both gateway pods MUST land in us-west-2a (enforced by
+# null_resource.gateway_nodeaffinity_patch above). This protects
+# against POD failures but NOT against AZ-2a outages — if 2a
+# evaporates, the NLB has no path and ingress is dead either way.
+#
+# Phase #59b candidate: add Public subnets in us-west-2b/c, expand
+# the NLB subnets list, drop the single-AZ nodeAffinity, and add
+# topologyspread/anti-affinity to spread pods across AZs. That's a
+# real network-layer change (new subnets, route tables, IGW
+# associations) — not a 1-line replicas bump.
+#
+# Anti-affinity: PREFER (not require) different nodes. The lab
+# actually has only ONE static node in us-west-2a — discovered
+# during Phase #59's first apply when the new RS pod sat Pending
+# 90s on "0/4 nodes available: 1 didn't match anti-affinity".
+# Karpenter NodePools in this cluster are GPU-only (no general-
+# purpose pool to spawn a second 2a node), so requiredDuring-
+# scheduling was unsatisfiable.
+#
+# preferredDuringSchedulingIgnoredDuringExecution with weight=100
+# makes the scheduler try hard to spread pods across nodes but
+# allow colocation when there's no other choice. Effect today:
+# both pods land on the same node — no node-failure HA — but we
+# DO get pod-failure HA (istio upgrade rollout, OOM, eviction).
+# That's the incremental win this phase delivers.
+#
+# Phase #59c candidate: add a general-purpose Karpenter NodePool
+# (CPU-only, multi-AZ) so the cluster can spawn a second 2a node
+# under load. Then the preferred antiAffinity actually spreads
+# pods across nodes. Until then, "preferred" is honest about the
+# constraint.
+#
+# Persistence: same caveat as the nodeAffinity patch. Istio's
+# gateway controller doesn't continuously reconcile the Deployment,
+# so this patch sticks across normal cluster ops. Istio upgrades
+# that recreate the Deployment require this null_resource to be
+# tainted to re-apply (same as nodeAffinity).
+# =============================================================================
+
+resource "null_resource" "gateway_replicas_patch" {
+  triggers = {
+    replicas    = "2"
+    gateway_uid = kubectl_manifest.shared_gateway.uid
+    # Bumped 2026-04-30 (Phase #59 fix): switched anti-affinity from
+    # requiredDuringScheduling to preferredDuringScheduling because
+    # the cluster has only one static us-west-2a node + GPU-only
+    # Karpenter NodePools, so required was unsatisfiable. Trigger
+    # value just needs to be unique-per-config-change; bump when
+    # editing the patch payload below.
+    affinity_mode = "preferred-v2"
+  }
+
+  # JSON merge patch (NOT strategic). Strategic merge preserves
+  # omitted fields, so the previous "preferred-v1" patch left
+  # the legacy `requiredDuringSchedulingIgnoredDuringExecution`
+  # alongside the new preferred — and required wins, leaving the
+  # new RS pod Pending. JSON merge patch with an explicit null
+  # for required REMOVES it. The omitted nodeAffinity field is
+  # also preserved by JSON merge (merge applies recursively to
+  # objects), so the gateway_nodeaffinity_patch's us-west-2a
+  # constraint stays intact.
+  provisioner "local-exec" {
+    command = <<-EOT
+      kubectl -n gateway-system patch deployment shared-gateway-istio --type=merge --patch '{
+        "spec": {
+          "replicas": ${self.triggers.replicas},
+          "template": {
+            "spec": {
+              "affinity": {
+                "podAntiAffinity": {
+                  "preferredDuringSchedulingIgnoredDuringExecution": [{
+                    "weight": 100,
+                    "podAffinityTerm": {
+                      "labelSelector": {
+                        "matchLabels": {
+                          "gateway.networking.k8s.io/gateway-name": "shared-gateway"
+                        }
+                      },
+                      "topologyKey": "kubernetes.io/hostname"
+                    }
+                  }],
+                  "requiredDuringSchedulingIgnoredDuringExecution": null
+                }
+              }
+            }
+          }
+        }
+      }'
+    EOT
+  }
+
+  depends_on = [
+    kubectl_manifest.shared_gateway,
+    null_resource.gateway_nodeaffinity_patch,
+  ]
+}
+
+# =============================================================================
 # Per-app resources: invoke the gateway-app module once per entry in
 # local.gateway_apps. Each invocation creates a ReferenceGrant + an
 # AuthorizationPolicy in the target namespace.

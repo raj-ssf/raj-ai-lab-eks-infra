@@ -94,11 +94,16 @@ resource "helm_release" "argo_rollouts" {
       }
 
       controller = {
-        # Single replica is correct: Argo Rollouts uses leader election
-        # but the chart defaults to 2 replicas which is overkill for
-        # the lab's traffic. Bump to 2+ if we ever need HA control-
-        # plane semantics (e.g., during a node drain mid-canary).
-        replicas = 1
+        # Phase #57: 1 → 2 for HA. argo-rollouts uses Lease-based
+        # leader election (default lease lock in argo-rollouts ns)
+        # so a second replica sits warm-standby. During a node
+        # drain or controller-pod OOM, the standby takes leadership
+        # within ~15s instead of leaving canary cycles unprocessed
+        # for several minutes (default lease duration). The chart
+        # default of 2 was originally rejected as "overkill"; with
+        # ~50 active Rollouts/AnalysisRuns in the cluster post-
+        # Phase-#28+ work it's the right call.
+        replicas = 2
         resources = {
           requests = {
             cpu    = "100m"

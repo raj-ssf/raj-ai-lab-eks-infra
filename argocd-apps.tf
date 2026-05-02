@@ -298,6 +298,19 @@ resource "kubectl_manifest" "vllm_app" {
           jsonPointers = ["/spec/replicas"]
         },
         {
+          # Phase #81d: distilled 1B student (trivial-fast tier).
+          # Same operator-driven scaling pattern as the other vllm-*
+          # Deployments — kubectl scale up for demos, scale to 0
+          # after. Without this entry ArgoCD selfHeal reverts kubectl
+          # scale within ~3 sec because llm/base/deployment-models.
+          # yaml hard-codes replicas: 0.
+          group        = "apps"
+          kind         = "Deployment"
+          name         = "vllm-llama-1b-distilled"
+          namespace    = "llm"
+          jsonPointers = ["/spec/replicas"]
+        },
+        {
           group        = "apps"
           kind         = "Deployment"
           name         = "vllm-bge-m3"

@@ -51,8 +51,38 @@ resource "helm_release" "istio_cni" {
     yamlencode({
       cni = {
         # Chained mode: inserted after VPC CNI in /etc/cni/net.d.
-        chained      = true
+        chained           = true
         excludeNamespaces = ["kube-system", "istio-system"]
+
+        # Phase #66 + ragas-eval failure 2026-05-01: when Karpenter
+        # spawns a new node, istio-cni-node DaemonSet takes ~30s to
+        # land + configure iptables. CPU workloads pulling small
+        # images (e.g., the ragas-eval Job) get scheduled within
+        # seconds of node-Ready, BEFORE istio-cni has its iptables
+        # redirects in place. The pod's istio-validation init
+        # container retries connections to 127.0.0.6:15002 (istio-
+        # cni pilot-agent IPC) 5 times then exits 126 with:
+        #   "When using Istio CNI, this can occur if a pod is
+        #    scheduled before the node is ready. If installed with
+        #    'cni.repair.deletePods=true', this pod should
+        #    automatically be deleted and retry."
+        #
+        # The repair controller watches for this exact failure
+        # condition (iptables-validation-failed) and auto-deletes
+        # affected pods so kubelet reschedules them — by which point
+        # istio-cni-node is Ready. Adds ~30-60s wall-clock to first
+        # pod-on-fresh-Karpenter-node startup; eliminates the manual
+        # "delete pod and retry" intervention.
+        #
+        # Pre-Phase-#66 this race was invisible because only GPU
+        # pods used Karpenter, and vllm's multi-GB image pull always
+        # outlasted istio-cni's startup. With Phase #66's general-
+        # purpose CPU NodePool, fast-startup pods land on fresh
+        # nodes and hit the race.
+        repair = {
+          enabled    = true
+          deletePods = true
+        }
       }
     })
   ]
@@ -76,10 +106,66 @@ resource "helm_release" "istiod" {
           clusterName = module.eks.cluster_name
         }
       }
-      # Keep the control plane small for a 3-node lab. Bump replicas/memory
-      # when the mesh grows beyond a handful of workloads.
+      # Phase #60: 1 → 2 replicas. The original "keep the control
+      # plane small for a 3-node lab" comment was right when the
+      # mesh spanned ~5 namespaces. Today istio_meshed_namespaces
+      # (rag, qdrant, keycloak, argocd, langgraph) plus the
+      # separately-labelled monitoring + argo-rollouts + chat +
+      # ingestion + langfuse + gateway-system means istiod is in
+      # the synchronous path of:
+      #   - sidecar injection for every CREATE in any of ~10 ns
+      #   - xDS push to every meshed pod on config change
+      #   - admission webhook for every CRUD on Sidecar/
+      #     ServiceEntry/PeerAuthentication/AuthorizationPolicy
+      # Single-pod istiod = one OOM/restart pauses ALL of that for
+      # 30-60s while the replacement pod becomes Ready.
+      #
+      # Unlike argo-rollouts (leader-election standby), istiod's
+      # xDS server is stateless. Service round-robin distributes
+      # xDS requests across healthy pods, so 2 replicas double
+      # throughput AND give pod-failure HA. The chart auto-creates
+      # a PodDisruptionBudget at replicas>1 (maxUnavailable=1) so
+      # node drains can't take both pods down simultaneously.
+      #
+      # Anti-affinity preferred (not required) to spread across
+      # nodes when possible. Cluster has 3 static nodes across 3
+      # AZs (no AZ pinning on istiod), so spread is satisfiable
+      # today. preferred is still the right choice — if the
+      # cluster ever loses a node mid-rollout, scheduler colocates
+      # rather than leaving istiod degraded. Same lesson as
+      # Phase #59 (gateway-system).
       pilot = {
-        replicaCount = 1
+        replicaCount = 2
+        # The istiod chart enables HPA by default with autoscaleMin=1.
+        # When HPA is enabled, it continuously reconciles
+        # deployment.spec.replicas to its calculated value, which
+        # OVERRIDES the helm replicaCount: helm applies the initial
+        # value, the HPA controller scales back down to its
+        # minReplicas (1) within ~15s because CPU is below the 80%
+        # threshold. Raising autoscaleMin to 2 makes 2 the HPA
+        # floor, so we keep the load-driven scale-up benefit while
+        # ensuring 2 pods at idle.
+        # Discovered Phase #60 first apply: replicaCount=2 landed,
+        # then HPA scaled to 1 within 30s. PDB allowedDisruptions=0
+        # didn't help — that only protects against voluntary
+        # eviction, not HPA scale-down (HPA writes to .spec.replicas
+        # directly, bypassing eviction).
+        autoscaleEnabled = true
+        autoscaleMin     = 2
+        autoscaleMax     = 5 # chart default, kept explicit
+        affinity = {
+          podAntiAffinity = {
+            preferredDuringSchedulingIgnoredDuringExecution = [{
+              weight = 100
+              podAffinityTerm = {
+                labelSelector = {
+                  matchLabels = { istio = "pilot" }
+                }
+                topologyKey = "kubernetes.io/hostname"
+              }
+            }]
+          }
+        }
         resources = {
           requests = { cpu = "100m", memory = "256Mi" }
           limits   = { cpu = "500m", memory = "512Mi" }
@@ -264,6 +350,65 @@ resource "kubectl_manifest" "qdrant_authz_policy" {
         from = [{
           source = {
             principals = ["cluster.local/ns/rag/sa/rag-service"]
+          }
+        }]
+      }]
+    }
+  })
+
+  depends_on = [
+    helm_release.istiod,
+    kubectl_manifest.qdrant_peer_auth_strict,
+  ]
+}
+
+# =============================================================================
+# Phase #76: AuthZ allow for qdrant cluster intra-pod traffic.
+#
+# Qdrant 1 → 3 with cluster mode (Phase #76 in raj-ai-lab-eks gitops
+# repo) needs each qdrant-N pod to reach every other qdrant-N pod on
+# port 6335 (P2P Raft consensus + data replication). The two existing
+# AuthorizationPolicies in qdrant ns (allow-rag-service-only +
+# allow-ingestion-service) only allow rag-service and ingestion-
+# service principals → no rule covered qdrant→qdrant intra-cluster
+# calls, so STRICT mTLS rejected them with "RBAC: access denied"
+# wrapped as a transport error.
+#
+# Symptom on first apply of #76: qdrant-1 / qdrant-2 panicked at
+# startup with:
+#   ERROR qdrant::startup: Panic occurred ... Can't initialize
+#     consensus: Failed to initialize Consensus for new Raft state:
+#     Failed to add peer to known: status: Unknown, message:
+#     "transport error"
+#
+# Fix: this policy. Allows the qdrant pods' own principal (default
+# SA in the qdrant namespace) to call into qdrant pods. Combined
+# with the existing allow-rag-service-only and allow-ingestion-
+# service policies (Istio AuthZ rules are OR'd — any matching ALLOW
+# admits the request), this restores cluster peer-mesh without
+# loosening the public-API enforcement.
+#
+# Principal: cluster.local/ns/qdrant/sa/default — the qdrant
+# StatefulSet pods don't have a dedicated ServiceAccount today, so
+# they run as the namespace's `default` SA. Phase #76b candidate:
+# create `qdrant` ServiceAccount and update statefulset.yaml to use
+# it; tighten this principal accordingly.
+# =============================================================================
+
+resource "kubectl_manifest" "qdrant_intra_cluster_authz" {
+  yaml_body = yamlencode({
+    apiVersion = "security.istio.io/v1"
+    kind       = "AuthorizationPolicy"
+    metadata = {
+      name      = "allow-qdrant-cluster"
+      namespace = "qdrant"
+    }
+    spec = {
+      action = "ALLOW"
+      rules = [{
+        from = [{
+          source = {
+            principals = ["cluster.local/ns/qdrant/sa/default"]
           }
         }]
       }]

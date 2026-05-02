@@ -67,19 +67,35 @@ resource "aws_iam_policy" "eval_pod_s3" {
     Version = "2012-10-17"
     Statement = [
       {
-        Sid      = "ReadAdaptersAndDatasets"
-        Effect   = "Allow"
-        Action   = ["s3:GetObject", "s3:GetObjectVersion"]
+        Sid    = "ReadAdaptersAndDatasets"
+        Effect = "Allow"
+        Action = ["s3:GetObject", "s3:GetObjectVersion"]
         Resource = [
           "${aws_s3_bucket.training.arn}/adapters/*",
           "${aws_s3_bucket.training.arn}/datasets/*",
         ]
       },
       {
-        Sid    = "WriteEvalResults"
-        Effect = "Allow"
-        Action = ["s3:PutObject", "s3:GetObject", "s3:DeleteObject"]
+        Sid      = "WriteEvalResults"
+        Effect   = "Allow"
+        Action   = ["s3:PutObject", "s3:GetObject", "s3:DeleteObject"]
         Resource = "${aws_s3_bucket.training.arn}/eval-results/*"
+      },
+      {
+        # Phase #81b: dataset-prep Job (distill-dataset-prep.yaml in
+        # gitops repo) runs as eval-pod and writes teacher-output JSONL
+        # to s3://<training-bucket>/datasets/distill-*. eval-pod's
+        # default access to datasets/* is READ-ONLY (above) for normal
+        # eval workflows that consume training data — distillation
+        # FLIPS that pattern: eval-pod becomes the producer of
+        # distillation training data. Scoped to the distill-* prefix
+        # so eval-pod still can't overwrite the F2 fine-tuning
+        # datasets that were placed under datasets/ for the existing
+        # 8B+Alpaca workflow.
+        Sid      = "WriteDistillationDatasets"
+        Effect   = "Allow"
+        Action   = ["s3:PutObject", "s3:GetObject", "s3:DeleteObject"]
+        Resource = "${aws_s3_bucket.training.arn}/datasets/distill-*"
       },
       {
         Sid      = "ListBucketScoped"

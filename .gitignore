@@ -17,3 +17,12 @@ tfplan
 *.tfplan
 plan.out
 backend.hcl
+# Added by code-review-graph
+.code-review-graph/
+
+# code-review-graph install --platform claude-code drops these
+# per-repo tooling artifacts. Personal-tooling, not shared
+# project state.
+.claude/
+.mcp.json
+CLAUDE.md

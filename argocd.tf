@@ -37,10 +37,10 @@ resource "helm_release" "argocd" {
           # we use that instead of the default argocd-secret so Vault can
           # own the value without fighting the chart for that Secret.
           "oidc.config" = yamlencode({
-            name         = "Keycloak"
-            issuer       = "https://keycloak.${var.domain}/realms/${var.cluster_name}"
-            clientID     = "argocd"
-            clientSecret = "$argocd-oidc-vault:client_secret"
+            name            = "Keycloak"
+            issuer          = "https://keycloak.${var.domain}/realms/${var.cluster_name}"
+            clientID        = "argocd"
+            clientSecret    = "$argocd-oidc-vault:client_secret"
             requestedScopes = ["openid", "profile", "email"]
             requestedIDTokenClaims = {
               groups = { essential = true }
@@ -55,7 +55,7 @@ resource "helm_release" "argocd" {
             g, argocd-admins,  role:admin
             g, argocd-viewers, role:readonly
           EOT
-          scopes = "[groups]"
+          scopes           = "[groups]"
         }
 
         # OIDC client secret is delivered via VSO → argocd-oidc-vault Secret;
@@ -78,6 +78,78 @@ resource "helm_release" "argocd" {
       #   3. Pin the Job image to digest format in helm values.
       redisSecretInit = {
         enabled = false
+      }
+
+      # Phase #74: argocd-redis → argocd-redis-ha.
+      #
+      # Replaces the single-pod argocd-redis Deployment with a 3-pod
+      # Redis Sentinel StatefulSet + 3-replica HAProxy Deployment.
+      # The argocd chart's `redis-ha` sub-chart wires this transparently:
+      # argocd-server, argocd-repo-server, argocd-application-controller,
+      # argocd-applicationset-controller all auto-detect redis-ha and
+      # connect via argocd-redis-ha-haproxy Service (no manual env
+      # rewiring needed in the consumer pods).
+      #
+      # Topology:
+      #   redis-ha StatefulSet     3 pods (master + 2 replicas + sentinel
+      #                            in each pod for leader election).
+      #                            requiredDuringScheduling anti-affinity
+      #                            on hostname (hardAntiAffinity: true)
+      #                            so Sentinel quorum survives a node
+      #                            failure. Cluster has 3 nodes spread
+      #                            across us-west-2{a,b,c}, so the
+      #                            constraint is satisfiable.
+      #   haproxy Deployment       3 pods. Reads route to any healthy
+      #                            replica; writes route to the current
+      #                            master (Sentinel-elected). Clients
+      #                            (argocd-server etc.) talk to HAProxy
+      #                            on the standard 6379 port — no
+      #                            client-side awareness of master/
+      #                            replica or failover.
+      #
+      # Failover: Sentinel detects master loss within ~5s (down-after-
+      # milliseconds default), elects a replica as new master,
+      # HAProxy reconfigures backends. argocd-server's client
+      # connection re-establishes against the new master with a brief
+      # blip in cache reads.
+      #
+      # Cost: ~3 redis-ha pods × 100Mi memory + ~3 haproxy pods ×
+      # 50Mi memory = ~450Mi cluster-wide. Negligible. Each redis-ha
+      # pod uses an emptyDir (chart default) — no PVC, no EBS cost.
+      # argocd-redis is a CACHE, not a system of record; in-memory
+      # state is fine and the cache rebuilds from the K8s API on
+      # cold start.
+      #
+      # Migration: helm upgrade replaces the existing argocd-redis
+      # Deployment with the redis-ha StatefulSet + HAProxy. argocd-
+      # redis Service flips to point at the haproxy Service. Brief
+      # ~30s window where argocd's API responses are slow (cache
+      # rebuilding) — acceptable.
+      redis = {
+        enabled = false
+      }
+      "redis-ha" = {
+        enabled = true
+        # Chart default replicas=3 — keeping. Sentinel quorum is
+        # 2-of-3, so single-pod failure is tolerated. Single-AZ
+        # failure (since we have 1 node per AZ) takes 1 of 3
+        # pods → still quorum.
+        # haproxy: 3 replicas keeps client connections HA across
+        # node restarts.
+        haproxy = {
+          enabled  = true
+          replicas = 3
+          # Anti-affinity already required by chart default; making
+          # the requirement explicit here for documentation.
+          hardAntiAffinity = true
+        }
+        # Redis pod-level anti-affinity (keep chart default true) —
+        # redis-ha StatefulSet pods MUST land on different nodes,
+        # else losing a node takes down >1 sentinel-quorum member.
+        hardAntiAffinity = true
+        # Persistence: chart default is emptyDir (no PVC). Argocd's
+        # redis is a cache; leaving as ephemeral. The cluster has
+        # gp3 SC available if we ever flip to persistent.
       }
 
       server = {
@@ -149,5 +221,62 @@ resource "kubectl_manifest" "argocd_httproute" {
 
   depends_on = [
     helm_release.argocd,
+  ]
+}
+
+# =============================================================================
+# Phase #70g: NetworkPolicy for argocd namespace.
+#
+# Same meshed-app pattern as Phase #70f (rag/langgraph/ingestion/
+# chat-ui), with two additions:
+#   1. Gateway-system ingress — argocd-server is exposed externally
+#      via shared-gateway, identical to chat-ui's pattern in #70f.
+#   2. podSelector matches the entire namespace (empty selector)
+#      because argocd has 6 deployments + redis. Per-component
+#      policies would yield ~7 NetworkPolicies for marginal precision
+#      gain over Istio AuthZ's existing per-component allows.
+#
+# Why empty podSelector is acceptable here:
+#   The whole argocd namespace is one logical workload — server,
+#   repo-server, dex, applicationset-controller, notifications-
+#   controller, redis. Treating them as a unit aligns with how
+#   they're managed (single helm release) and the namespace-wide
+#   intra-ns allow already in istio-zero-trust.tf.
+#
+# Egress reuses local.app_common_egress from
+# app-network-policies.tf — DNS, istiod, all meshed namespaces,
+# vault, K8s API. argocd-repo-server's git egress (github.com:443)
+# is covered by the K8s-API rule's 0.0.0.0/0:443 allow.
+# =============================================================================
+
+resource "kubectl_manifest" "argocd_netpol" {
+  yaml_body = yamlencode({
+    apiVersion = "networking.k8s.io/v1"
+    kind       = "NetworkPolicy"
+    metadata = {
+      name      = "argocd"
+      namespace = "argocd"
+    }
+    spec = {
+      podSelector = {} # all pods in argocd ns
+      policyTypes = ["Ingress", "Egress"]
+      # Common-meshed ingress + gateway-system (north-south for
+      # argocd-server). Mirrors chat-ui's pattern in #70f.
+      ingress = concat(local.app_common_ingress, [{
+        from = [{
+          namespaceSelector = {
+            matchLabels = {
+              "kubernetes.io/metadata.name" = "gateway-system"
+            }
+          }
+        }]
+      }])
+      egress = local.app_common_egress
+    }
+  })
+
+  depends_on = [
+    helm_release.argocd,
+    helm_release.istiod,
   ]
 }

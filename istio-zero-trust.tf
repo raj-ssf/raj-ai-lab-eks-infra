@@ -583,15 +583,56 @@ resource "kubectl_manifest" "allow_prometheus_scrape_meshwide" {
     }
     spec = {
       action = "ALLOW"
+      # Phase #55b: relaxed from principal-based to path-only allow.
+      #
+      # Before this commit, the rule required:
+      #   from.source.principals = [prometheus SA SPIFFE]
+      #   to.operation.paths     = [/metrics, /stats/prometheus]
+      # The principal restriction is the canonical Istio pattern but
+      # was UNMATCHABLE in practice for kube-prometheus-stack:
+      # ServiceMonitor scraping uses pod-SD (pod IPs), which BYPASSES
+      # Istio's auto-mTLS upgrade path. Outbound calls to raw pod IPs
+      # don't trigger DestinationRule resolution, so Envoy connects
+      # plaintext. Plaintext requests carry no SPIFFE principal →
+      # rule's `from` clause doesn't match → falls through to the
+      # mesh-wide deny-all → HTTP 403 Forbidden on every scrape.
+      #
+      # Symptom (pre-fix): 33 Prometheus targets DOWN, all with
+      # "server returned HTTP status 403 Forbidden". Affected:
+      # chat-ui, rag-service (+ canary/stable), langgraph-service
+      # (+ canary/stable), ingestion-service (+ canary/stable),
+      # alertmanager, grafana, kube-state-metrics, prometheus-
+      # operator, argo-rollouts metrics. ~46% of total scrape
+      # targets.
+      #
+      # Fix paths considered:
+      #   A. Drop principal, keep path restriction (this commit).
+      #      Simplest — single AuthZ change.
+      #   B. Mesh-wide DestinationRule forcing ISTIO_MUTUAL.
+      #      Broad blast radius (would force mTLS on calls to
+      #      vault.vault.svc which doesn't speak Istio mTLS).
+      #   C. Refactor every ServiceMonitor to use istio-agent
+      #      merged metrics on :15020 + add prometheus.istio.io/
+      #      merge-metrics annotation to all meshed pods. The
+      #      architecturally-correct Istio + Prometheus integration.
+      #      Gitops-repo work × 4 app ServiceMonitors + chart
+      #      defaults via prometheus-stack.tf overrides.
+      #
+      # Going with A here. C is the production-grade target;
+      # tracked as Phase #55c for a future session. With A in
+      # place, /metrics scrape paths are OPEN to any source —
+      # any meshed/unmeshed pod can hit /metrics endpoints
+      # cluster-wide. Information-disclosure risk is bounded
+      # to "operational metrics" (request rates, latencies,
+      # resource usage) — not user data. Acceptable for lab;
+      # production would do C.
+      #
+      # Path restriction stays: only /metrics and /stats/prometheus
+      # are admitted by this rule. Arbitrary paths (e.g., admin
+      # APIs at /api/v1/...) still fall through to deny-all
+      # because no path-matching rule exists for them.
       rules = [
         {
-          from = [{
-            source = {
-              principals = [
-                "cluster.local/ns/monitoring/sa/kube-prometheus-stack-prometheus",
-              ]
-            }
-          }]
           to = [{
             operation = {
               paths = ["/metrics", "/stats/prometheus"]
@@ -617,6 +658,12 @@ resource "kubectl_manifest" "allow_argo_rollouts_to_prometheus" {
     apiVersion = "security.istio.io/v1"
     kind       = "AuthorizationPolicy"
     metadata = {
+      # Renamed effective scope: was argo-rollouts-only (Phase #34),
+      # now serves any non-meshed Prometheus query client. Keeping
+      # the resource name `allow-argo-rollouts` since changing it
+      # mid-flight would force a delete+recreate against the live
+      # rule. The selector + paths are what matter; the name is
+      # historical.
       name      = "allow-argo-rollouts"
       namespace = "monitoring"
     }
@@ -627,15 +674,32 @@ resource "kubectl_manifest" "allow_argo_rollouts_to_prometheus" {
         }
       }
       action = "ALLOW"
+      # Phase #80d follow-up: dropped the principal restriction
+      # for the same reason Phase #55b dropped it on the
+      # `allow-prometheus-scrape` rule. KEDA's prometheus_scaler
+      # (Phase #80d) calls /api/v1/query from an UNMESHED namespace
+      # (keda) so calls carry no SPIFFE principal — the rule's
+      # `from.source.principals` clause never matches and the call
+      # falls through to the mesh-wide deny → 403.
+      #
+      # Symptom seen 2026-05-01 21:18 UTC after Phase #80d apply:
+      #   keda-operator log:
+      #     prometheus query api returned error. status: 403
+      #     response: RBAC: access denied
+      #
+      # Same security tradeoff as Phase #55b: path-only AuthZ
+      # opens /api/v1/query + /api/v1/query_range to ANY source.
+      # The exposed surface is the read-only Prometheus query API
+      # — operational metrics (request rates, latencies, resource
+      # usage). Information disclosure risk is real but bounded.
+      # Production-grade architectural fix would be:
+      #   (a) mesh the keda namespace, OR
+      #   (b) emit Prometheus exposed via a separate PERMISSIVE
+      #       Service for non-meshed clients.
+      # Both are Phase #80f candidates. Path-only is the lab
+      # answer.
       rules = [
         {
-          from = [{
-            source = {
-              principals = [
-                "cluster.local/ns/argo-rollouts/sa/argo-rollouts",
-              ]
-            }
-          }]
           to = [{
             operation = {
               paths = ["/api/v1/query", "/api/v1/query_range"]

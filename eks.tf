@@ -115,6 +115,27 @@ module "eks" {
       most_recent                 = true
       resolve_conflicts_on_update = "OVERWRITE"
     }
+    # Phase #68: metrics-server addon. The cluster shipped without
+    # metrics-server (the original config focused on data-plane add-
+    # ons); discovered when Phase #60 (istiod HPA) and Phase #67
+    # (rag/langgraph/ingestion/chat-ui HPAs) all showed
+    # `cpu: <unknown>/70%`. Without metrics-server, HPAs can't make
+    # CPU-based scaling decisions, `kubectl top` fails, and many
+    # core dashboards in Grafana show empty data.
+    #
+    # EKS managed addon (vs running the helm chart directly):
+    # auto-updates with EKS version bumps, AWS-handled HA, no
+    # serviceAccount/IRSA wiring needed (the addon ships the SA
+    # bound to the necessary cluster-internal RBAC). For a lab on
+    # EKS, this is the lowest-friction path.
+    #
+    # Once this addon is Active, the HPAs from #60 + #67 start
+    # reading actual pod CPU and the `<unknown>` placeholders
+    # disappear within ~30s.
+    metrics-server = {
+      most_recent                 = true
+      resolve_conflicts_on_update = "OVERWRITE"
+    }
     aws-ebs-csi-driver = {
       most_recent = true
       # Pod Identity is the working credential path (see iam-ebs-csi.tf:
