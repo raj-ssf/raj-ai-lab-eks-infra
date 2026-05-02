@@ -219,94 +219,29 @@ resource "kubectl_manifest" "vllm_app" {
       #   - `vllm-<model>`      — model-test variants (different
       #                           models on their optimal hardware);
       #                           see llm/base/deployment-models.yaml
+      # 2026-05-02: GPU scaling moved from manual (kubectl scale +
+      # broad ignoreDifferences) to gitops (replicas: in
+      # llm/base/deployment-models.yaml + deployment-variants.yaml
+      # is now authoritative). Edit the manifest, push, ArgoCD
+      # syncs the new replicas count.
+      #
+      # Three Deployments still keep ignoreDifferences on /spec/replicas
+      # because they're scaled by something OTHER than a human commit:
+      #   - vllm-llama-8b: KEDA ScaledObject (Phase #80d) writes
+      #     /spec/replicas continuously based on cron + Prometheus
+      #     triggers. Gitops enforcement would fight KEDA → unstable.
+      #   - vllm-bge-m3: scaled up by the ragas-eval GH Actions
+      #     workflow before each eval run, scaled down after. Also
+      #     scaled by ingestion-service for embedding warmup. Gitops
+      #     would revert these mid-flight.
+      #   - vllm-deepseek-r1-70b: scaled by the same ragas-eval
+      #     workflow AND langgraph-service's ensure_warm path when
+      #     a reasoning-tier request arrives. Same revert risk.
       ignoreDifferences = [
         {
           group        = "apps"
           kind         = "Deployment"
-          name         = "vllm"
-          namespace    = "llm"
-          jsonPointers = ["/spec/replicas"]
-        },
-        {
-          group        = "apps"
-          kind         = "Deployment"
-          name         = "vllm-g4dn-4gpu"
-          namespace    = "llm"
-          jsonPointers = ["/spec/replicas"]
-        },
-        {
-          group        = "apps"
-          kind         = "Deployment"
-          name         = "vllm-g6e-1gpu"
-          namespace    = "llm"
-          jsonPointers = ["/spec/replicas"]
-        },
-        {
-          group        = "apps"
-          kind         = "Deployment"
-          name         = "vllm-g6e-4gpu"
-          namespace    = "llm"
-          jsonPointers = ["/spec/replicas"]
-        },
-        {
-          group        = "apps"
-          kind         = "Deployment"
-          name         = "vllm-p4d-8gpu"
-          namespace    = "llm"
-          jsonPointers = ["/spec/replicas"]
-        },
-        {
-          group        = "apps"
-          kind         = "Deployment"
-          name         = "vllm-p5-8gpu"
-          namespace    = "llm"
-          jsonPointers = ["/spec/replicas"]
-        },
-        {
-          group        = "apps"
-          kind         = "Deployment"
           name         = "vllm-llama-8b"
-          namespace    = "llm"
-          jsonPointers = ["/spec/replicas"]
-        },
-        {
-          group        = "apps"
-          kind         = "Deployment"
-          name         = "vllm-mixtral-8x7b"
-          namespace    = "llm"
-          jsonPointers = ["/spec/replicas"]
-        },
-        {
-          group        = "apps"
-          kind         = "Deployment"
-          name         = "vllm-llama-vision-11b"
-          namespace    = "llm"
-          jsonPointers = ["/spec/replicas"]
-        },
-        {
-          group        = "apps"
-          kind         = "Deployment"
-          name         = "vllm-llama-405b"
-          namespace    = "llm"
-          jsonPointers = ["/spec/replicas"]
-        },
-        {
-          group        = "apps"
-          kind         = "Deployment"
-          name         = "vllm-deepseek-r1-70b"
-          namespace    = "llm"
-          jsonPointers = ["/spec/replicas"]
-        },
-        {
-          # Phase #81d: distilled 1B student (trivial-fast tier).
-          # Same operator-driven scaling pattern as the other vllm-*
-          # Deployments — kubectl scale up for demos, scale to 0
-          # after. Without this entry ArgoCD selfHeal reverts kubectl
-          # scale within ~3 sec because llm/base/deployment-models.
-          # yaml hard-codes replicas: 0.
-          group        = "apps"
-          kind         = "Deployment"
-          name         = "vllm-llama-1b-distilled"
           namespace    = "llm"
           jsonPointers = ["/spec/replicas"]
         },
@@ -318,23 +253,9 @@ resource "kubectl_manifest" "vllm_app" {
           jsonPointers = ["/spec/replicas"]
         },
         {
-          # bge-reranker (TEI cross-encoder, RAG completeness phase).
-          # Same scale-to-zero default + manual spin-up pattern.
           group        = "apps"
           kind         = "Deployment"
-          name         = "vllm-bge-reranker"
-          namespace    = "llm"
-          jsonPointers = ["/spec/replicas"]
-        },
-        {
-          # llama-guard-3-8b (Phase #4 content safety classifier).
-          # Same scale-to-zero default; operator scales up before a
-          # session that needs the safety filter active. Caught in the
-          # 2026-04-29 Phase #4 activation smoke — without this entry
-          # ArgoCD selfHeal reverts the manual scale-up mid-cold-start.
-          group        = "apps"
-          kind         = "Deployment"
-          name         = "vllm-llama-guard-3-8b"
+          name         = "vllm-deepseek-r1-70b"
           namespace    = "llm"
           jsonPointers = ["/spec/replicas"]
         },
