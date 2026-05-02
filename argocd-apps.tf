@@ -219,43 +219,33 @@ resource "kubectl_manifest" "vllm_app" {
       #   - `vllm-<model>`      — model-test variants (different
       #                           models on their optimal hardware);
       #                           see llm/base/deployment-models.yaml
-      # 2026-05-02: GPU scaling moved from manual (kubectl scale +
-      # broad ignoreDifferences) to gitops (replicas: in
-      # llm/base/deployment-models.yaml + deployment-variants.yaml
-      # is now authoritative). Edit the manifest, push, ArgoCD
-      # syncs the new replicas count.
+      # 2026-05-02 (Phase #81e Option-A): all GPU Deployment scaling
+      # moved to gitops (single source of truth in
+      # raj-ai-lab-eks/llm/base/scaling.yaml). Operator scales by
+      # editing that file's `replicas:` numbers + push.
       #
-      # Three Deployments still keep ignoreDifferences on /spec/replicas
-      # because they're scaled by something OTHER than a human commit:
-      #   - vllm-llama-8b: KEDA ScaledObject (Phase #80d) writes
-      #     /spec/replicas continuously based on cron + Prometheus
-      #     triggers. Gitops enforcement would fight KEDA → unstable.
-      #   - vllm-bge-m3: scaled up by the ragas-eval GH Actions
-      #     workflow before each eval run, scaled down after. Also
-      #     scaled by ingestion-service for embedding warmup. Gitops
-      #     would revert these mid-flight.
-      #   - vllm-deepseek-r1-70b: scaled by the same ragas-eval
-      #     workflow AND langgraph-service's ensure_warm path when
-      #     a reasoning-tier request arrives. Same revert risk.
+      # Only ONE Deployment still keeps /spec/replicas in
+      # ignoreDifferences: vllm-llama-8b. KEDA's ScaledObject
+      # (Phase #80d) writes /spec/replicas continuously based on
+      # cron + Prometheus triggers — gitops enforcement of the
+      # baseline would fight KEDA → unstable. The scaling.yaml
+      # entry for vllm-llama-8b is a baseline KEDA reads only on
+      # cold start.
+      #
+      # Two Deployments REMOVED from this list 2026-05-02:
+      #   - vllm-bge-m3: previously scaled by ragas-eval workflow
+      #     and ingestion-service ensure-warm. Both removed; now
+      #     scaled via scaling.yaml only.
+      #   - vllm-deepseek-r1-70b: previously scaled by ragas-eval
+      #     workflow and langgraph-service's ensure_warm. Workflow's
+      #     scale steps deleted (.github/workflows/ragas-eval.yml)
+      #     and ensure_warm modified to wait-only (no kubectl-scale)
+      #     so neither path fights gitops anymore.
       ignoreDifferences = [
         {
           group        = "apps"
           kind         = "Deployment"
           name         = "vllm-llama-8b"
-          namespace    = "llm"
-          jsonPointers = ["/spec/replicas"]
-        },
-        {
-          group        = "apps"
-          kind         = "Deployment"
-          name         = "vllm-bge-m3"
-          namespace    = "llm"
-          jsonPointers = ["/spec/replicas"]
-        },
-        {
-          group        = "apps"
-          kind         = "Deployment"
-          name         = "vllm-deepseek-r1-70b"
           namespace    = "llm"
           jsonPointers = ["/spec/replicas"]
         },
