@@ -3,18 +3,19 @@ terraform {
 
 
   backend "s3" {
-      # values supplied via -backend-config=backend.hcl
-}
+    # values supplied via -backend-config=backend.hcl
+  }
 
   required_providers {
-    aws        = { source = "hashicorp/aws",        version = "~> 5.70" }
+    aws        = { source = "hashicorp/aws", version = "~> 5.70" }
     kubernetes = { source = "hashicorp/kubernetes", version = "~> 2.33" }
-    helm       = { source = "hashicorp/helm",       version = "~> 2.15" }
-    tls        = { source = "hashicorp/tls",        version = "~> 4.0" }
-    kubectl    = { source = "alekc/kubectl",        version = "~> 2.1" }
-    http       = { source = "hashicorp/http",       version = "~> 3.4" }
-    random     = { source = "hashicorp/random",     version = "~> 3.6" }
-    vault      = { source = "hashicorp/vault",      version = "~> 4.4" }
-    keycloak   = { source = "keycloak/keycloak",    version = "~> 5.0" }
+    helm       = { source = "hashicorp/helm", version = "~> 2.15" }
+    tls        = { source = "hashicorp/tls", version = "~> 4.0" }
+    kubectl    = { source = "alekc/kubectl", version = "~> 2.1" }
+    http       = { source = "hashicorp/http", version = "~> 3.4" }
+    random     = { source = "hashicorp/random", version = "~> 3.6" }
+    vault      = { source = "hashicorp/vault", version = "~> 4.4" }
+    keycloak   = { source = "keycloak/keycloak", version = "~> 5.0" }
+    github     = { source = "integrations/github", version = "~> 6.3" }
   }
 }
