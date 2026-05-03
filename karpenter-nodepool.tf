@@ -339,9 +339,19 @@ resource "kubectl_manifest" "karpenter_nodepool_gpu_experiments" {
         consolidateAfter    = "30s"
       }
       limits = {
-        cpu              = "192"    # p5.48xlarge = 192 vCPU
-        memory           = "2048Gi" # p5.48xlarge = 2 TiB RAM
-        "nvidia.com/gpu" = "8"
+        # 2026-05-03: nvidia.com/gpu bumped 8 → 24, cpu 192 → 384,
+        # memory 2048Gi → 4096Gi to allow co-hosting an 8-GPU
+        # flagship-model instance (p4d.24xlarge or p5.48xlarge for
+        # the 405B / equivalent) ALONGSIDE the always-warm 8B's
+        # 1× g6.xlarge plus headroom for one additional 4-GPU
+        # hardware-comparison test (g6e.12xlarge or p4d.6xlarge).
+        # Hit the prior 8-GPU cap when first scaling the 405B to
+        # replicas=1 — Karpenter refused to provision because
+        # existing 8B (1 GPU) + new p4d (8 GPUs) = 9 > 8 cap.
+        # 24 = 1 (8B) + 8 (flagship) + 4 (variant) + 11 slack.
+        cpu              = "384"
+        memory           = "4096Gi"
+        "nvidia.com/gpu" = "24"
       }
     }
   })

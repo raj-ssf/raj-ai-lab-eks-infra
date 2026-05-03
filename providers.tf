@@ -3,9 +3,9 @@ provider "aws" {
   profile = var.aws_profile
 
   assume_role {
-      role_arn     = var.terraform_role_arn
-      session_name = "terraform-raj-ai-lab"
-    }
+    role_arn     = var.terraform_role_arn
+    session_name = "terraform-raj-ai-lab"
+  }
 
   default_tags {
     tags = local.common_tags
@@ -19,7 +19,7 @@ provider "kubernetes" {
   exec {
     api_version = "client.authentication.k8s.io/v1beta1"
     command     = "aws"
-    args = ["eks", "get-token", "--cluster-name", module.eks.cluster_name, "--region", var.region, "--profile", var.aws_profile]
+    args        = ["eks", "get-token", "--cluster-name", module.eks.cluster_name, "--region", var.region, "--profile", var.aws_profile]
   }
 }
 
@@ -31,20 +31,20 @@ provider "helm" {
     exec {
       api_version = "client.authentication.k8s.io/v1beta1"
       command     = "aws"
-      args = ["eks", "get-token", "--cluster-name", module.eks.cluster_name, "--region", var.region, "--profile", var.aws_profile]
+      args        = ["eks", "get-token", "--cluster-name", module.eks.cluster_name, "--region", var.region, "--profile", var.aws_profile]
     }
   }
 }
 
 provider "kubectl" {
-    host                   = module.eks.cluster_endpoint
-    cluster_ca_certificate = base64decode(module.eks.cluster_certificate_authority_data)
-    load_config_file       = false
+  host                   = module.eks.cluster_endpoint
+  cluster_ca_certificate = base64decode(module.eks.cluster_certificate_authority_data)
+  load_config_file       = false
 
-    exec {
-      api_version = "client.authentication.k8s.io/v1beta1"
-      command     = "aws"
-      args        = ["eks", "get-token", "--cluster-name", module.eks.cluster_name, "--region", var.region, "--profile", var.aws_profile]
+  exec {
+    api_version = "client.authentication.k8s.io/v1beta1"
+    command     = "aws"
+    args        = ["eks", "get-token", "--cluster-name", module.eks.cluster_name, "--region", var.region, "--profile", var.aws_profile]
   }
 }
 
@@ -69,4 +69,15 @@ provider "vault" {
       secret_id = var.vault_terraform_secret_id
     }
   }
+}
+
+# GitHub provider used by argocd-webhook.tf to manage push-event webhooks
+# on raj-ssf/raj-ai-lab-eks and raj-ssf/raj-ai-lab-eks-infra. Auth via the
+# GITHUB_TOKEN env var — easiest to source from `gh auth token`:
+#   export GITHUB_TOKEN=$(gh auth token)
+#   terraform apply
+# Token needs `admin:repo_hook` scope (creating/deleting repository webhooks).
+# A standard `gh auth login --scopes admin:repo_hook` token has it.
+provider "github" {
+  owner = "raj-ssf"
 }
