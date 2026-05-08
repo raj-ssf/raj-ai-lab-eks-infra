@@ -1,21 +1,25 @@
-# Karpenter — node autoprovisioner that replaces static EKS managed node
-# groups for GPU workloads.
+# Karpenter — node autoprovisioner. In the new (Cilium) cluster, Karpenter
+# owns 100% of EC2 capacity, including the baseline that used to live in
+# the eks_managed_node_groups.default block.
 #
-# Lifecycle model shift:
-#   before: flip var.enable_gpu_node_group + terraform apply → GPU node joins
-#           (2-3 min) → vllm pod schedules. Reverse for teardown.
-#    now:   `kubectl -n llm scale deployment vllm --replicas=1` → Karpenter
-#           sees the Pending GPU-requesting pod → provisions a node in
-#           ~60-90s → pod schedules. `--replicas=0` → Karpenter consolidates
-#           the empty node and terminates it in ~30s.
+# Lifecycle model shift (recap):
+#   old cluster (raj-ai-lab-eks):
+#     - 1 managed NG (m5.xlarge × 3) for the baseline workloads
+#     - Karpenter on TOP of that NG, provisioning extra GPU/burst capacity
+#     - Karpenter controller pinned to NG via nodeSelector workload=general
+#       (foot-gun prevention: don't let it run on a GPU node it just made)
 #
-# Karpenter itself runs as a Deployment in kube-system. Pinned to the default
-# (m5.xlarge) node group via nodeSelector so it doesn't accidentally schedule
-# onto a GPU node it just provisioned (circular-dependency foot-gun).
+#   new cluster (raj-ai-lab-eks-cilium):
+#     - ZERO managed node groups
+#     - Karpenter controller pod runs on FARGATE (see fargate_profiles in
+#       eks.tf — the "karpenter" namespace selector catches it)
+#     - 100% of EC2 capacity provisioned by Karpenter on demand
+#     - The "first EC2 node" is provisioned when the first non-Fargate
+#       workload (e.g., a test pod, then Cilium DaemonSet) is pending
 #
-# The default (m5.xlarge × 3) node group stays as EKS managed — we don't
-# need Karpenter for static baseline workloads. Karpenter's value is
-# capacity that's dynamic, expensive, or instance-type-picky (GPUs).
+# Foot-gun prevention is now handled by Fargate vs EC2 separation rather
+# than by nodeSelector — Karpenter on Fargate physically can't end up on
+# an EC2 node it just provisioned.
 
 # -----------------------------------------------------------------------------
 # IAM, SQS, access entries — handled by the terraform-aws-modules submodule
@@ -35,12 +39,37 @@ module "karpenter" {
 
   cluster_name = module.eks.cluster_name
 
-  # Use Pod Identity, not IRSA. Matches the pattern of every other workload
-  # in this cluster (see bedrock.tf, kyverno.tf, etc.) and survives cluster
-  # recreate because trust is on the fixed service principal, not a per-
-  # cluster OIDC issuer.
-  enable_pod_identity             = true
-  create_pod_identity_association = true
+  # CRITICAL for Fargate-bootstrap: namespace must match where the karpenter
+  # helm release actually lives. Default is "kube-system" but our helm
+  # release is in "karpenter" namespace (matches the Fargate profile
+  # selector in eks.tf). If this doesn't match, the EKS Pod Identity
+  # webhook can't find a matching PIA for the pod's (ns, sa) tuple → no
+  # credentials sidecar injected → Karpenter falls through to IMDS →
+  # Fargate has no IMDS → panic. (Spent ~2 hours discovering this on
+  # 2026-05-08.)
+  namespace = "karpenter"
+
+  # 2026-05-08 — IRSA-only for Karpenter on Fargate.
+  #
+  # Initially tried Pod Identity (matches the rest of the cluster's pattern).
+  # When the Pod Identity webhook (0500-amazon-eks-fargate-mutation) injects
+  # AWS_CONTAINER_CREDENTIALS_FULL_URI + AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE,
+  # the IRSA webhook (iam-for-pods.amazonaws.com) sees the pod already has
+  # AWS credential env vars and SKIPS injecting AWS_WEB_IDENTITY_TOKEN_FILE.
+  # Result: pod has Pod Identity env vars only. Karpenter v1.5.0's startup
+  # appears to hang somewhere during AWS API init with this config (no logs
+  # accessible via kubectl from Fargate to confirm root cause).
+  #
+  # Disabling Pod Identity for Karpenter ensures only IRSA fires, giving
+  # Karpenter the well-documented IRSA credential path via projected SA
+  # token volume + AWS_WEB_IDENTITY_TOKEN_FILE. Other workloads in the
+  # cluster (handled in pod-identity.tf etc.) keep their Pod Identity
+  # Associations — only Karpenter is the exception.
+  enable_pod_identity             = false
+  create_pod_identity_association = false
+  enable_irsa                     = true
+  irsa_oidc_provider_arn          = module.eks.oidc_provider_arn
+  irsa_namespace_service_accounts = ["karpenter:karpenter"]
 
   # Attach SSM policy to Karpenter-provisioned nodes so we can debug them
   # via Session Manager without SSH keys.
@@ -55,10 +84,14 @@ module "karpenter" {
 # Karpenter Helm release
 # -----------------------------------------------------------------------------
 resource "helm_release" "karpenter" {
-  name       = "karpenter"
-  namespace  = "kube-system"
-  repository = "oci://public.ecr.aws/karpenter"
-  chart      = "karpenter"
+  name             = "karpenter"
+  # Namespace changed from kube-system → karpenter so it matches the
+  # "karpenter" Fargate profile selector defined in eks.tf. Helm creates
+  # the namespace if it doesn't exist (create_namespace = true).
+  namespace        = "karpenter"
+  create_namespace = true
+  repository       = "oci://public.ecr.aws/karpenter"
+  chart            = "karpenter"
   # Pin deliberately. Karpenter version must support the cluster's K8s
   # version — 1.1.x only supports K8s up to 1.31; we're on 1.34, so we
   # need 1.5.x+ (earlier version matrix: 1.2→K8s1.32, 1.3→K8s1.33,
@@ -82,21 +115,40 @@ resource "helm_release" "karpenter" {
         # SA name to the controller IAM role. Don't rename without also
         # updating the association.
         name = "karpenter"
+        # IRSA annotation — triggers iam-for-pods.amazonaws.com webhook to
+        # inject AWS_WEB_IDENTITY_TOKEN_FILE + projected token volume.
+        # Belt-and-suspenders with Pod Identity (env var injection):
+        # whichever credential path the SDK picks up first is used.
+        annotations = {
+          "eks.amazonaws.com/role-arn" = module.karpenter.iam_role_arn
+        }
       }
-      # Pin the controller to the default (non-GPU) node group. Prevents the
-      # foot-gun where Karpenter schedules itself onto a GPU node it just
-      # provisioned, and then that node can't be drained because the
-      # controller draining it is on it.
-      nodeSelector = {
-        workload = "general"
-      }
+      # nodeSelector REMOVED — old cluster pinned Karpenter to the default
+      # managed NG via {workload: general}. New cluster has no managed NG;
+      # the "karpenter" namespace's Fargate Profile (in eks.tf) routes the
+      # controller pod onto Fargate automatically. No nodeSelector needed.
       controller = {
+        # AWS_REGION env var: Karpenter on Fargate cannot reach EC2 IMDS
+        # at 169.254.169.254 to auto-detect region. Without this var the
+        # controller crashes with: panic: operation error ec2imds: GetRegion,
+        # request canceled, context deadline exceeded. Inject explicitly.
+        env = [
+          { name = "AWS_REGION",         value = var.region },
+          { name = "AWS_DEFAULT_REGION", value = var.region },
+        ]
         resources = {
-          requests = { cpu = "200m", memory = "256Mi" }
+          # Slightly bumped requests since Fargate charges per requested
+          # vCPU/memory — overprovisioning here directly costs money.
+          # Karpenter controller in steady state uses ~50-100m CPU /
+          # 200-400Mi memory. Requesting 250m/512Mi gives headroom for
+          # cold-start and provisioning bursts.
+          requests = { cpu = "250m", memory = "512Mi" }
           limits   = { cpu = "1",    memory = "1Gi" }
         }
       }
-      # Single replica for a 3-node lab. Production runs 2+ for HA.
+      # Single replica for a lab. Production runs 2+ for HA. Each replica
+      # adds ~$0.012/hr Fargate cost, so going to 2 doubles Karpenter spend
+      # to ~$17/mo — fine for prod, unneeded for a personal sandbox.
       replicas = 1
     })
   ]

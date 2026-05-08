@@ -9,20 +9,21 @@ module "eks" {
   subnet_ids                               = data.aws_subnets.private.ids
   enable_cluster_creator_admin_permissions = true
 
-  # IRSA OIDC provider unused since the Pod Identity migration — every
-  # workload that needs AWS API access goes through
-  # aws_eks_pod_identity_association (current count is in the
-  # double digits across model-weights.tf, eval.tf, langgraph.tf,
-  # ingestion-service.tf, chat-ui.tf, training.tf, plus the platform
-  # bindings for karpenter/ALB/cert-manager/external-dns/EBS CSI/etc.;
-  # see `aws eks list-pod-identity-associations` for the live list).
-  # Disabling enable_irsa removes the orphaned
-  # aws_iam_openid_connect_provider and keeps IAM clean. The one
-  # leftover IRSA artifact — the eks.amazonaws.com/role-arn annotation
-  # on kube-system/ebs-csi-controller-sa — is documented in the
-  # aws-ebs-csi-driver block below (kept due to an SCP that blocks
-  # UpdateAddon when removing service_account_role_arn).
-  enable_irsa = false
+  # 2026-05-08 — IRSA RE-ENABLED for the Cilium-cluster rebuild.
+  # Original cluster had enable_irsa=false (Pod Identity-only). On the
+  # Fargate-bootstrap pattern, Pod Identity injection on Fargate works
+  # for env-var injection but Karpenter v1.5.0's controller still hangs
+  # somewhere during AWS-API initialization (no logs accessible from
+  # Fargate-by-kubectl, restart-loops with exit code 2 every ~3 min).
+  #
+  # IRSA via the iam-for-pods.amazonaws.com webhook is well-documented
+  # for Karpenter on Fargate. We enable both mechanisms:
+  #   - enable_irsa = true → creates aws_iam_openid_connect_provider
+  #   - Pod Identity Associations stay in place for other workloads
+  #
+  # Karpenter specifically uses IRSA via a service-account annotation
+  # (see karpenter.tf). All other workloads continue to use Pod Identity.
+  enable_irsa = true
 
   # Module's default node SG only opens 1025-65535/tcp between nodes, which
   # blocks cross-node pod-to-pod traffic on low ports (80, 443, 8443, etc.).
@@ -206,12 +207,30 @@ module "eks" {
     # configuration_values block on the coredns addon (above) sets
     # computeType=Fargate so the addon removes the EC2 node affinity
     # that would otherwise prevent Fargate scheduling.
+    #
+    # Hubble UI + Relay run on Fargate (regular Deployments, no IMDS or
+    # hostNetwork dependencies). They're targeted SPECIFICALLY by their
+    # individual labels — NOT via the broader app.kubernetes.io/part-of=cilium
+    # label, because that broader label would also match cilium-operator,
+    # and Fargate would CLAIM the operator pod (then refuse it because of
+    # hostNetwork=true) — once Fargate claims a pod, it doesn't release
+    # back to the default scheduler, so the operator stays Pending forever.
+    # The cilium operator stays off Fargate via its own targeting (cilium.tf
+    # operator block) AND via its absence from these selectors.
     kube-system = {
-      name = "kube-system-coredns"
+      name = "kube-system-bootstrap"
       selectors = [
         {
           namespace = "kube-system"
           labels    = { "k8s-app" = "kube-dns" }
+        },
+        {
+          namespace = "kube-system"
+          labels    = { "app.kubernetes.io/name" = "hubble-ui" }
+        },
+        {
+          namespace = "kube-system"
+          labels    = { "app.kubernetes.io/name" = "hubble-relay" }
         }
       ]
     }
