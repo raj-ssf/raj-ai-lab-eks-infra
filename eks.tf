@@ -68,19 +68,19 @@ module "eks" {
     coredns = {
       most_recent                 = true
       resolve_conflicts_on_update = "OVERWRITE"
-      # Rewrite keycloak.<domain> to the in-cluster Istio Gateway Service.
-      # Without a rewrite, pods resolving keycloak.<domain> get the NLB
-      # public IP and AWS drops the hairpin loopback with "connection
-      # reset by peer". The rewrite keeps in-cluster keycloak traffic
-      # in-cluster (no NLB hairpin), and the Istio Gateway Service
-      # terminates TLS via the keycloak-https listener + routes to
-      # keycloak via HTTPRoute.
+      # Cilium-migration note (Phase 1a):
+      #   computeType = "Fargate" tells the addon to remove the EC2 node
+      #   affinity (eks.amazonaws.com/compute-type=ec2) so CoreDNS pods
+      #   match the Fargate profile selector below. Without this flag,
+      #   the addon-managed Deployment fights the Fargate scheduler and
+      #   pods stay Pending forever.
       #
-      # Pre-2026-04-28: this rewrote to the (now-deleted) ingress-nginx
-      # Service. After Phase 12b decommissioned ingress-nginx, that
-      # Service vanished → NXDOMAIN → broke ALL in-cluster OIDC flows
-      # (argocd-server, langfuse-web, grafana token exchange).
+      # Phase 3 will re-add the in-cluster rewrite — at that point
+      # pointing at the Cilium Gateway Service (cilium-gateway-... in
+      # gateway-system) instead of the Istio Gateway Service the old
+      # cluster used. For now (Phase 1a) keep the corefile minimal.
       configuration_values = jsonencode({
+        computeType = "Fargate"
         corefile = <<-EOT
           .:53 {
               errors
@@ -88,7 +88,6 @@ module "eks" {
                   lameduck 5s
               }
               ready
-              rewrite name keycloak.${var.domain} shared-gateway-istio.gateway-system.svc.cluster.local
               kubernetes cluster.local in-addr.arpa ip6.arpa {
                   pods insecure
                   fallthrough in-addr.arpa ip6.arpa
@@ -107,10 +106,9 @@ module "eks" {
       most_recent                 = true
       resolve_conflicts_on_update = "OVERWRITE"
     }
-    vpc-cni = {
-      most_recent                 = true
-      resolve_conflicts_on_update = "OVERWRITE"
-    }
+    # vpc-cni REMOVED 2026-05-08 — Cilium native CNI replaces it.
+    # Cilium installs via helm in cilium.tf BEFORE Karpenter provisions
+    # any EC2 nodes, so VPC CNI's IP-allocation role is fully replaced.
     eks-pod-identity-agent = {
       most_recent                 = true
       resolve_conflicts_on_update = "OVERWRITE"
@@ -172,37 +170,50 @@ module "eks" {
     }
   }
 
-  # GPU node group removed 2026-04-24 — Karpenter owns GPU provisioning now.
-  # See karpenter.tf + karpenter-nodepool.tf for the replacement. Lifecycle
-  # shifted from "flip var.enable_gpu_node_group + terraform apply" to
-  # "kubectl scale deployment vllm" (pod demand → node).
-  eks_managed_node_groups = {
-    default = {
-      instance_types = var.node_instance_types
-      ami_type       = "AL2023_x86_64_STANDARD"
-      capacity_type  = "ON_DEMAND"
+  # eks_managed_node_groups REMOVED 2026-05-08 — Cilium migration.
+  #
+  # Lifecycle shift (this is the architecturally interesting part):
+  #
+  #   old cluster (raj-ai-lab-eks):
+  #     - 1 managed node group (default, m5.xlarge × 3) for the baseline
+  #     - Karpenter on TOP of that NG, provisioning extra capacity
+  #     - GPU workloads via Karpenter's gpu-experiments NodePool
+  #
+  #   new cluster (raj-ai-lab-eks-cilium):
+  #     - ZERO managed node groups
+  #     - Karpenter pods run on Fargate (see fargate_profiles below)
+  #     - 100% of EC2 capacity (incl. baseline) provisioned by Karpenter
+  #     - "First EC2 node" emerges when Cilium DaemonSet's Pending pod
+  #       triggers Karpenter to scale up
+  #     - GPU workloads same as before — gpu-experiments NodePool
+  #
+  # Cost trade: ~$25/mo Fargate spend for Karpenter + CoreDNS pods,
+  # in exchange for: no static bootstrap node group to manage upgrades
+  # for, uniform Karpenter labels across all nodes, single provisioning
+  # path with one set of observability hooks.
 
-      desired_size = var.node_desired_size
-      min_size     = var.node_min_size
-      max_size     = var.node_max_size
-
-      disk_size = 50
-
-      block_device_mappings = {
-        xvda = {
-          device_name = "/dev/xvda"
-          ebs = {
-            volume_size           = 50
-            volume_type           = "gp3"
-            encrypted             = true
-            delete_on_termination = true
-          }
+  # Fargate profiles — bootstrap workloads that must run BEFORE any
+  # EC2 node exists. Pod selectors are namespace + label-based; only
+  # pods matching a selector schedule on Fargate.
+  fargate_profiles = {
+    karpenter = {
+      name = "karpenter"
+      selectors = [
+        { namespace = "karpenter" }
+      ]
+    }
+    # CoreDNS Deployment pods carry label k8s-app=kube-dns. The
+    # configuration_values block on the coredns addon (above) sets
+    # computeType=Fargate so the addon removes the EC2 node affinity
+    # that would otherwise prevent Fargate scheduling.
+    kube-system = {
+      name = "kube-system-coredns"
+      selectors = [
+        {
+          namespace = "kube-system"
+          labels    = { "k8s-app" = "kube-dns" }
         }
-      }
-
-      labels = {
-        workload = "general"
-      }
+      ]
     }
   }
 
