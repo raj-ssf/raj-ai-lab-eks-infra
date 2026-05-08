@@ -12,9 +12,18 @@ provider "aws" {
   }
 }
 
+# Myriad TLS-interception note (2026-05-08):
+#   On the corporate network/VPN, Palo Alto re-signs HTTPS connections
+#   to AWS EKS endpoints with CN=untrusted.myriad.com. Terraform's helm
+#   provider uses cluster_ca_certificate from module.eks output to verify
+#   the cert, and rejects the inspected one. Setting insecure = true
+#   bypasses verification — same fix applied to kubeconfig contexts in
+#   ~/.kube/config (see feedback_myriad_tls_interception_personal_aws.md).
+#   Drop cluster_ca_certificate alongside since insecure makes it unused.
+
 provider "kubernetes" {
-  host                   = module.eks.cluster_endpoint
-  cluster_ca_certificate = base64decode(module.eks.cluster_certificate_authority_data)
+  host     = module.eks.cluster_endpoint
+  insecure = true
 
   exec {
     api_version = "client.authentication.k8s.io/v1beta1"
@@ -25,8 +34,8 @@ provider "kubernetes" {
 
 provider "helm" {
   kubernetes {
-    host                   = module.eks.cluster_endpoint
-    cluster_ca_certificate = base64decode(module.eks.cluster_certificate_authority_data)
+    host     = module.eks.cluster_endpoint
+    insecure = true
 
     exec {
       api_version = "client.authentication.k8s.io/v1beta1"
@@ -37,9 +46,9 @@ provider "helm" {
 }
 
 provider "kubectl" {
-  host                   = module.eks.cluster_endpoint
-  cluster_ca_certificate = base64decode(module.eks.cluster_certificate_authority_data)
-  load_config_file       = false
+  host             = module.eks.cluster_endpoint
+  insecure         = true
+  load_config_file = false
 
   exec {
     api_version = "client.authentication.k8s.io/v1beta1"

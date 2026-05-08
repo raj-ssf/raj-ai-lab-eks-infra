@@ -195,18 +195,26 @@ resource "helm_release" "cilium" {
       }
 
       # ---------------------------------------------------------------------
-      # Operator — runs on Fargate via the kube-system Fargate profile that
-      # selects label app.kubernetes.io/part-of=cilium (set in eks.tf)
+      # Operator — runs on EC2 nodes (provisioned by Karpenter). Originally
+      # planned for Fargate but Cilium's AWS operator calls ec2imds
+      # GetInstanceIdentityDocument at startup which is not available on
+      # Fargate. Falls back to EC2 in the standard hostNetwork=true config.
       # ---------------------------------------------------------------------
+      # nodeSelector pins operator to the Karpenter-managed "general" pool.
+      # Originally tried eks.amazonaws.com/compute-type=ec2, but that label
+      # is only set on Fargate nodes (=fargate); Karpenter doesn't know
+      # what "ec2" means and rejects the pod with "incompatible requirements,
+      # label does not have known values". Using karpenter.sh/nodepool is
+      # unambiguous — Karpenter understands this and provisions a node from
+      # the general NodePool when no matching node exists.
       operator = {
+        nodeSelector = {
+          "karpenter.sh/nodepool" = "general"
+        }
+
         # Single replica is fine for a lab. Production runs 2+ for HA.
         replicas = 1
 
-        # The default operator pod has the right labels already (set by
-        # the chart's templates). Just need it to pass through Pod Identity
-        # by NOT overriding service account name.
-
-        # Resource requests on Fargate are billed; size for actual usage.
         resources = {
           requests = { cpu = "50m",  memory = "128Mi" }
           limits   = { cpu = "500m", memory = "512Mi" }
@@ -214,12 +222,14 @@ resource "helm_release" "cilium" {
       }
 
       # ---------------------------------------------------------------------
-      # Agent (DaemonSet) — runs on EC2 nodes that Karpenter provisions
+      # Agent (DaemonSet) — runs on EC2 nodes that Karpenter provisions.
+      # In Cilium's helm schema, `agent` is a boolean (deploy DaemonSet?)
+      # — defaults to true, no need to override. Agent container resources
+      # would go under `resources:` at the chart's top level if needed
+      # (default: requests cpu=100m / memory=512Mi). For Phase 1a defaults
+      # are fine — agent is lightweight in eBPF mode (~100m / 200Mi steady
+      # state on a typical lab node).
       # ---------------------------------------------------------------------
-      agent = {
-        # Default resources are fine. Cilium agent is lightweight in eBPF
-        # mode (~100m CPU / 200Mi memory steady state).
-      }
 
       # ---------------------------------------------------------------------
       # Pod Security — EKS Pod Security Standards may flag privileged
@@ -235,9 +245,14 @@ resource "helm_release" "cilium" {
     aws_eks_pod_identity_association.cilium_operator,
   ]
 
-  # Cilium installs many CRDs (CiliumEndpoint, CiliumNetworkPolicy, etc.)
-  # — let helm wait for them to be Established before declaring success.
-  wait          = true
-  timeout       = 600
-  atomic        = false # don't auto-rollback; debug failures manually
+  # 2026-05-08 update: wait = false. Originally set to true so helm
+  # would block until DaemonSet ready. But Cilium agent on EC2 nodes
+  # waits for the operator to allocate ENIs; operator can't run until
+  # Karpenter provisions another EC2 node; chicken-and-egg means the
+  # 600s wait keeps timing out even though the chart installs cleanly.
+  # With wait=false, helm submits manifests and returns; K8s controllers
+  # settle out post-apply.
+  wait    = false
+  timeout = 600
+  atomic  = false # don't auto-rollback; debug failures manually
 }
