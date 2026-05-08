@@ -232,6 +232,52 @@ resource "helm_release" "cilium" {
       # ---------------------------------------------------------------------
 
       # ---------------------------------------------------------------------
+      # nodeAffinity — exclude Fargate nodes from the agent DaemonSet
+      # ---------------------------------------------------------------------
+      # Without this, the DaemonSet controller creates a pod per node
+      # including Fargate nodes. Fargate refuses DaemonSet pods, so they
+      # sit Pending forever (cosmetic noise — confusing in monitoring).
+      # The DoesNotExist operator matches nodes that don't have the
+      # eks.amazonaws.com/compute-type key at all (EC2 nodes from
+      # Karpenter), and excludes nodes where it's set to "fargate".
+      affinity = {
+        nodeAffinity = {
+          requiredDuringSchedulingIgnoredDuringExecution = {
+            nodeSelectorTerms = [
+              {
+                matchExpressions = [
+                  {
+                    key      = "eks.amazonaws.com/compute-type"
+                    operator = "DoesNotExist"
+                  },
+                ]
+              },
+            ]
+          }
+        }
+      }
+
+      # Same exclusion for the envoy DaemonSet
+      envoy = {
+        affinity = {
+          nodeAffinity = {
+            requiredDuringSchedulingIgnoredDuringExecution = {
+              nodeSelectorTerms = [
+                {
+                  matchExpressions = [
+                    {
+                      key      = "eks.amazonaws.com/compute-type"
+                      operator = "DoesNotExist"
+                    },
+                  ]
+                },
+              ]
+            }
+          }
+        }
+      }
+
+      # ---------------------------------------------------------------------
       # Pod Security — EKS Pod Security Standards may flag privileged
       # containers; Cilium agent legitimately needs CAP_NET_ADMIN, etc.
       # The kube-system namespace has the privileged label by default in
