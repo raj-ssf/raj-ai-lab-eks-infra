@@ -206,12 +206,23 @@ module "eks" {
     # configuration_values block on the coredns addon (above) sets
     # computeType=Fargate so the addon removes the EC2 node affinity
     # that would otherwise prevent Fargate scheduling.
+    #
+    # Second selector: Cilium operator pods. The operator Deployment is
+    # NOT hostNetwork, so it needs pod IP — but Cilium IS the CNI, which
+    # creates the chicken-and-egg the operator solves by running on
+    # Fargate (Fargate uses AWS-managed networking, doesn't need Cilium).
+    # The Cilium agent DaemonSet still runs on EC2 nodes (Fargate
+    # explicitly refuses DaemonSets, so that selector is safe-by-default).
     kube-system = {
-      name = "kube-system-coredns"
+      name = "kube-system-bootstrap"
       selectors = [
         {
           namespace = "kube-system"
           labels    = { "k8s-app" = "kube-dns" }
+        },
+        {
+          namespace = "kube-system"
+          labels    = { "app.kubernetes.io/part-of" = "cilium" }
         }
       ]
     }

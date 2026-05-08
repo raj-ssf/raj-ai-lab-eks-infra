@@ -1,21 +1,25 @@
-# Karpenter — node autoprovisioner that replaces static EKS managed node
-# groups for GPU workloads.
+# Karpenter — node autoprovisioner. In the new (Cilium) cluster, Karpenter
+# owns 100% of EC2 capacity, including the baseline that used to live in
+# the eks_managed_node_groups.default block.
 #
-# Lifecycle model shift:
-#   before: flip var.enable_gpu_node_group + terraform apply → GPU node joins
-#           (2-3 min) → vllm pod schedules. Reverse for teardown.
-#    now:   `kubectl -n llm scale deployment vllm --replicas=1` → Karpenter
-#           sees the Pending GPU-requesting pod → provisions a node in
-#           ~60-90s → pod schedules. `--replicas=0` → Karpenter consolidates
-#           the empty node and terminates it in ~30s.
+# Lifecycle model shift (recap):
+#   old cluster (raj-ai-lab-eks):
+#     - 1 managed NG (m5.xlarge × 3) for the baseline workloads
+#     - Karpenter on TOP of that NG, provisioning extra GPU/burst capacity
+#     - Karpenter controller pinned to NG via nodeSelector workload=general
+#       (foot-gun prevention: don't let it run on a GPU node it just made)
 #
-# Karpenter itself runs as a Deployment in kube-system. Pinned to the default
-# (m5.xlarge) node group via nodeSelector so it doesn't accidentally schedule
-# onto a GPU node it just provisioned (circular-dependency foot-gun).
+#   new cluster (raj-ai-lab-eks-cilium):
+#     - ZERO managed node groups
+#     - Karpenter controller pod runs on FARGATE (see fargate_profiles in
+#       eks.tf — the "karpenter" namespace selector catches it)
+#     - 100% of EC2 capacity provisioned by Karpenter on demand
+#     - The "first EC2 node" is provisioned when the first non-Fargate
+#       workload (e.g., a test pod, then Cilium DaemonSet) is pending
 #
-# The default (m5.xlarge × 3) node group stays as EKS managed — we don't
-# need Karpenter for static baseline workloads. Karpenter's value is
-# capacity that's dynamic, expensive, or instance-type-picky (GPUs).
+# Foot-gun prevention is now handled by Fargate vs EC2 separation rather
+# than by nodeSelector — Karpenter on Fargate physically can't end up on
+# an EC2 node it just provisioned.
 
 # -----------------------------------------------------------------------------
 # IAM, SQS, access entries — handled by the terraform-aws-modules submodule
@@ -55,10 +59,14 @@ module "karpenter" {
 # Karpenter Helm release
 # -----------------------------------------------------------------------------
 resource "helm_release" "karpenter" {
-  name       = "karpenter"
-  namespace  = "kube-system"
-  repository = "oci://public.ecr.aws/karpenter"
-  chart      = "karpenter"
+  name             = "karpenter"
+  # Namespace changed from kube-system → karpenter so it matches the
+  # "karpenter" Fargate profile selector defined in eks.tf. Helm creates
+  # the namespace if it doesn't exist (create_namespace = true).
+  namespace        = "karpenter"
+  create_namespace = true
+  repository       = "oci://public.ecr.aws/karpenter"
+  chart            = "karpenter"
   # Pin deliberately. Karpenter version must support the cluster's K8s
   # version — 1.1.x only supports K8s up to 1.31; we're on 1.34, so we
   # need 1.5.x+ (earlier version matrix: 1.2→K8s1.32, 1.3→K8s1.33,
@@ -83,20 +91,24 @@ resource "helm_release" "karpenter" {
         # updating the association.
         name = "karpenter"
       }
-      # Pin the controller to the default (non-GPU) node group. Prevents the
-      # foot-gun where Karpenter schedules itself onto a GPU node it just
-      # provisioned, and then that node can't be drained because the
-      # controller draining it is on it.
-      nodeSelector = {
-        workload = "general"
-      }
+      # nodeSelector REMOVED — old cluster pinned Karpenter to the default
+      # managed NG via {workload: general}. New cluster has no managed NG;
+      # the "karpenter" namespace's Fargate Profile (in eks.tf) routes the
+      # controller pod onto Fargate automatically. No nodeSelector needed.
       controller = {
         resources = {
-          requests = { cpu = "200m", memory = "256Mi" }
+          # Slightly bumped requests since Fargate charges per requested
+          # vCPU/memory — overprovisioning here directly costs money.
+          # Karpenter controller in steady state uses ~50-100m CPU /
+          # 200-400Mi memory. Requesting 250m/512Mi gives headroom for
+          # cold-start and provisioning bursts.
+          requests = { cpu = "250m", memory = "512Mi" }
           limits   = { cpu = "1",    memory = "1Gi" }
         }
       }
-      # Single replica for a 3-node lab. Production runs 2+ for HA.
+      # Single replica for a lab. Production runs 2+ for HA. Each replica
+      # adds ~$0.012/hr Fargate cost, so going to 2 doubles Karpenter spend
+      # to ~$17/mo — fine for prod, unneeded for a personal sandbox.
       replicas = 1
     })
   ]
