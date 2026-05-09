@@ -93,6 +93,32 @@ resource "kubectl_manifest" "keycloak_cert" {
   ]
 }
 
+resource "kubectl_manifest" "langfuse_cert" {
+  yaml_body = yamlencode({
+    apiVersion = "cert-manager.io/v1"
+    kind       = "Certificate"
+    metadata = {
+      name      = "langfuse-tls"
+      namespace = "langfuse"
+    }
+    spec = {
+      secretName = "langfuse-tls"
+      issuerRef = {
+        name  = "letsencrypt-prod"
+        kind  = "ClusterIssuer"
+        group = "cert-manager.io"
+      }
+      commonName = "langfuse.${var.domain}"
+      dnsNames   = ["langfuse.${var.domain}"]
+    }
+  })
+
+  depends_on = [
+    kubectl_manifest.gateway_api_crds,
+    kubernetes_namespace.langfuse,
+  ]
+}
+
 resource "kubectl_manifest" "argocd_cert" {
   yaml_body = yamlencode({
     apiVersion = "cert-manager.io/v1"

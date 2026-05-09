@@ -63,6 +63,11 @@ locals {
       hostnames        = ["keycloak.${var.domain}"]
       cert_secret_name = "keycloak-tls"
     }
+    langfuse = {
+      namespace        = "langfuse"
+      hostnames        = ["langfuse.${var.domain}"]
+      cert_secret_name = "langfuse-tls"
+    }
   }
 
   gateway_listener_specs = flatten([
