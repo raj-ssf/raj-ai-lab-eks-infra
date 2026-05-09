@@ -250,6 +250,114 @@ resource "kubectl_manifest" "cert_manager_webhook_cnp" {
 # need it — not blanket "all HTTP" enforcement.
 # =============================================================================
 
+# --- monitoring namespace -----------------------------------------------------
+# Prometheus has the broadest egress shape in the cluster — scrapes every
+# meshed AND unmeshed namespace plus per-node endpoints (kubelet:10250,
+# node-exporter:9100, metric endpoints across cert-manager, kyverno,
+# vault, etc.). Tightening egress to "only meshed namespaces" would
+# silently break observability of system pods.
+#
+# Egress is permissive on common scrape ports + standard cluster paths.
+# Ingress: kube-apiserver (for Prometheus's K8s SD watches), other
+# monitoring pods, Cilium gateway pods (for grafana / hubble HTTPRoute
+# traffic).
+
+resource "kubectl_manifest" "monitoring_cnp" {
+  yaml_body = yamlencode({
+    apiVersion = "cilium.io/v2"
+    kind       = "CiliumNetworkPolicy"
+    metadata = {
+      name      = "monitoring-stack"
+      namespace = "monitoring"
+    }
+    spec = {
+      # Empty selector = all pods in monitoring ns. Same logical
+      # workload boundary (prometheus + alertmanager + grafana +
+      # tempo + kube-state-metrics + prometheus-operator + adapter
+      # all share lifecycle + chart).
+      endpointSelector = {}
+      ingress = [
+        # Allow gateway-system (Cilium gateway) → grafana for the
+        # external HTTPRoute traffic
+        {
+          fromEndpoints = [{
+            matchLabels = {
+              "k8s:io.kubernetes.pod.namespace" = "kube-system"
+              "k8s:k8s-app"                     = "cilium-envoy"
+            }
+          }]
+        },
+        # Allow kube-apiserver → metrics endpoints (for SD watches +
+        # webhook calls if any)
+        {
+          fromEntities = ["kube-apiserver"]
+        },
+        # Allow intra-monitoring traffic (prometheus → alertmanager,
+        # operator → CR-managed StatefulSets, etc.)
+        {
+          fromEndpoints = [{
+            matchLabels = {
+              "k8s:io.kubernetes.pod.namespace" = "monitoring"
+            }
+          }]
+        },
+      ]
+      egress = [
+        # DNS
+        {
+          toEndpoints = [{
+            matchLabels = {
+              "k8s:io.kubernetes.pod.namespace" = "kube-system"
+              "k8s:k8s-app"                     = "kube-dns"
+            }
+          }]
+          toPorts = [{
+            ports = [
+              { port = "53", protocol = "UDP" },
+              { port = "53", protocol = "TCP" },
+            ]
+          }]
+        },
+        # K8s API + AWS APIs
+        {
+          toEntities = ["kube-apiserver", "world"]
+          toPorts = [{
+            ports = [{ port = "443", protocol = "TCP" }]
+          }]
+        },
+        # Common scrape ports across all namespaces. Prometheus
+        # legitimately needs to reach pods in any namespace at
+        # these ports.
+        {
+          toEndpoints = [{ matchLabels = {} }] # any pod
+          toPorts = [{
+            ports = [
+              { port = "8080", protocol = "TCP" },  # kube-state-metrics
+              { port = "8443", protocol = "TCP" },  # cert-manager metrics, etc.
+              { port = "9090", protocol = "TCP" },  # Prometheus self
+              { port = "9091", protocol = "TCP" },  # Pushgateway-style
+              { port = "9100", protocol = "TCP" },  # node-exporter
+              { port = "9153", protocol = "TCP" },  # kube-dns metrics
+              { port = "9402", protocol = "TCP" },  # cert-manager
+              { port = "8000", protocol = "TCP" },  # generic /metrics
+              { port = "8001", protocol = "TCP" },  # generic
+              { port = "8081", protocol = "TCP" },  # alt /metrics
+              { port = "9402", protocol = "TCP" },  # alt
+              { port = "10250", protocol = "TCP" }, # kubelet
+              { port = "15020", protocol = "TCP" }, # istio-merged metrics (no longer relevant)
+            ]
+          }]
+        },
+      ]
+    }
+  })
+
+  depends_on = [
+    helm_release.cilium,
+    helm_release.kube_prometheus_stack,
+  ]
+}
+
 resource "kubectl_manifest" "rollouts_dashboard_l7_cnp" {
   yaml_body = yamlencode({
     apiVersion = "cilium.io/v2"
