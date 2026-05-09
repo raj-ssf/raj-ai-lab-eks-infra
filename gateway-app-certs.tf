@@ -119,6 +119,32 @@ resource "kubectl_manifest" "langfuse_cert" {
   ]
 }
 
+resource "kubectl_manifest" "rollouts_cert" {
+  yaml_body = yamlencode({
+    apiVersion = "cert-manager.io/v1"
+    kind       = "Certificate"
+    metadata = {
+      name      = "rollouts-tls"
+      namespace = "argo-rollouts"
+    }
+    spec = {
+      secretName = "rollouts-tls"
+      issuerRef = {
+        name  = "letsencrypt-prod"
+        kind  = "ClusterIssuer"
+        group = "cert-manager.io"
+      }
+      commonName = "rollouts.${var.domain}"
+      dnsNames   = ["rollouts.${var.domain}"]
+    }
+  })
+
+  depends_on = [
+    kubectl_manifest.gateway_api_crds,
+    kubernetes_namespace.argo_rollouts,
+  ]
+}
+
 resource "kubectl_manifest" "argocd_cert" {
   yaml_body = yamlencode({
     apiVersion = "cert-manager.io/v1"

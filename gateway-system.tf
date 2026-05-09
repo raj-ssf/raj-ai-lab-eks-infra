@@ -68,6 +68,11 @@ locals {
       hostnames        = ["langfuse.${var.domain}"]
       cert_secret_name = "langfuse-tls"
     }
+    rollouts = {
+      namespace        = "argo-rollouts"
+      hostnames        = ["rollouts.${var.domain}"]
+      cert_secret_name = "rollouts-tls"
+    }
   }
 
   gateway_listener_specs = flatten([
