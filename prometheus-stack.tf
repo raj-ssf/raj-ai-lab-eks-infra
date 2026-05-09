@@ -537,11 +537,48 @@ output "grafana_admin_password_hint" {
 # Sibling to the helm_release; see langfuse.tf for the pattern's rationale.
 # =============================================================================
 
-# Phase 2 (Cilium migration): HTTPRoute deferred to Phase 3.
-# Phase 3 will install gateway-system namespace + shared-gateway
-# (Cilium GatewayClass) and re-enable this HTTPRoute. Until then,
-# Grafana is reachable via `kubectl port-forward -n monitoring
-# svc/kube-prometheus-stack-grafana 3000:80`.
+# =============================================================================
+# Phase 3: HTTPRoute for grafana.${var.domain}. Sibling to the
+# helm_release; the route attaches to shared-gateway in gateway-system
+# via parentRefs.sectionName="grafana-https" (set in gateway-system.tf
+# listener spec for the grafana entry).
+# =============================================================================
+
+resource "kubectl_manifest" "grafana_httproute" {
+  yaml_body = yamlencode({
+    apiVersion = "gateway.networking.k8s.io/v1"
+    kind       = "HTTPRoute"
+    metadata = {
+      name      = "grafana"
+      namespace = "monitoring"
+      labels    = { app = "grafana" }
+    }
+    spec = {
+      parentRefs = [{
+        name        = "shared-gateway"
+        namespace   = "gateway-system"
+        sectionName = "grafana-https"
+      }]
+      hostnames = ["grafana.${var.domain}"]
+      rules = [{
+        matches = [{
+          path = { type = "PathPrefix", value = "/" }
+        }]
+        backendRefs = [{
+          # kube-prometheus-stack-grafana Service exposes port 80
+          # (named "http-web", targetPort 3000).
+          name = "kube-prometheus-stack-grafana"
+          port = 80
+        }]
+      }]
+    }
+  })
+
+  depends_on = [
+    helm_release.kube_prometheus_stack,
+    kubectl_manifest.shared_gateway,
+  ]
+}
 
 # =============================================================================
 # Phase #70g: NetworkPolicy for monitoring namespace.

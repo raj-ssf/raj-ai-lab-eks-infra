@@ -155,6 +155,19 @@ resource "helm_release" "cilium" {
       # kube-proxy (installed via EKS addon in eks.tf) does service NAT.
       kubeProxyReplacement = "false"
 
+      # Phase 3: enable Cilium's eBPF NodePort implementation in PARALLEL
+      # with kube-proxy. Cilium's Gateway API controller refuses to
+      # register the GatewayClass otherwise — it needs SOMETHING handling
+      # NodePort/LoadBalancer Service traffic in eBPF (kube-proxy alone
+      # doesn't provide hooks the Gateway controller can use). With both
+      # running, Cilium handles NodePort/LoadBalancer; kube-proxy still
+      # handles ClusterIP. The combo is officially supported per Cilium
+      # docs and is the recommended bridge mode for clusters that haven't
+      # yet flipped to full kubeProxyReplacement=true.
+      nodePort = {
+        enabled = true
+      }
+
       # K8s API endpoint (required when kubeProxyReplacement is true; safe
       # to set always so flipping later doesn't need a values change).
       k8sServiceHost = replace(module.eks.cluster_endpoint, "https://", "")
@@ -205,7 +218,10 @@ resource "helm_release" "cilium" {
       }
 
       # ---------------------------------------------------------------------
-      # Gateway API — controller is ready, no Gateway resources yet (Phase 3)
+      # Gateway API — Phase 3. Per-Gateway annotations are set via
+      # Gateway.spec.infrastructure.annotations (Gateway API spec v1.2)
+      # which Cilium propagates to the LoadBalancer Service it creates.
+      # See gateway-system.tf for the actual annotation values.
       # ---------------------------------------------------------------------
       gatewayAPI = {
         enabled = true
@@ -321,4 +337,45 @@ resource "helm_release" "cilium" {
   wait    = false
   timeout = 600
   atomic  = false # don't auto-rollback; debug failures manually
+}
+
+# =============================================================================
+# Phase 3: HTTPRoute for hubble.${var.domain}. Routes external traffic
+# to the Hubble UI Service (hubble-ui) in kube-system.
+# =============================================================================
+
+resource "kubectl_manifest" "hubble_ui_httproute" {
+  yaml_body = yamlencode({
+    apiVersion = "gateway.networking.k8s.io/v1"
+    kind       = "HTTPRoute"
+    metadata = {
+      name      = "hubble-ui"
+      namespace = "kube-system"
+      labels    = { app = "hubble-ui" }
+    }
+    spec = {
+      parentRefs = [{
+        name        = "shared-gateway"
+        namespace   = "gateway-system"
+        sectionName = "hubble-https"
+      }]
+      hostnames = ["hubble.${var.domain}"]
+      rules = [{
+        matches = [{
+          path = { type = "PathPrefix", value = "/" }
+        }]
+        backendRefs = [{
+          # hubble-ui Service is shipped by the Cilium chart in
+          # kube-system. Default port is 80 (proxies to nginx → frontend).
+          name = "hubble-ui"
+          port = 80
+        }]
+      }]
+    }
+  })
+
+  depends_on = [
+    helm_release.cilium,
+    kubectl_manifest.shared_gateway,
+  ]
 }
