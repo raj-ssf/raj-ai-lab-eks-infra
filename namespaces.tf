@@ -18,3 +18,15 @@ resource "kubernetes_namespace" "rag" {
     name = "rag"
   }
 }
+
+resource "kubernetes_namespace" "chat" {
+  metadata {
+    name = "chat"
+  }
+}
+
+resource "kubernetes_namespace" "ingestion" {
+  metadata {
+    name = "ingestion"
+  }
+}
