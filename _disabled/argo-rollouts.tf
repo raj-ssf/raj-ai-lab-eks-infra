@@ -157,7 +157,6 @@ resource "helm_release" "argo_rollouts" {
   # we hit webhook-race ordering issues during cluster bootstrap.
   depends_on = [
     module.eks,
-    helm_release.alb_controller,
   ]
 }
 

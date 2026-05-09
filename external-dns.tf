@@ -90,7 +90,6 @@ resource "helm_release" "external_dns" {
   depends_on = [
     module.eks,
     aws_eks_pod_identity_association.external_dns,
-    helm_release.alb_controller,
   ]
 }
 

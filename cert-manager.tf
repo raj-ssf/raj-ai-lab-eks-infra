@@ -122,7 +122,6 @@ resource "helm_release" "cert_manager" {
   depends_on = [
     module.eks,
     aws_eks_pod_identity_association.cert_manager,
-    helm_release.alb_controller,
   ]
 }
 

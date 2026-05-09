@@ -565,13 +565,9 @@ resource "helm_release" "kube_prometheus_stack" {
 
   depends_on = [
     module.eks,
-    helm_release.alb_controller, # avoid the webhook race we hit on cert-manager
     kubernetes_storage_class_v1.gp3,
     # Vault secrets must exist before the grafana pod rolls — agent-init
     # fails the pod otherwise.
-    vault_kv_secret_v2.grafana_admin,
-    vault_kv_secret_v2.grafana_oidc,
-    vault_kubernetes_auth_backend_role.grafana,
     # Phase #58c: admin Secret must exist before pod rolls or the
     # sidecar containers fail with CreateContainerConfigError. See
     # comment block on the resource for full background.
@@ -655,61 +651,3 @@ resource "kubectl_manifest" "grafana_httproute" {
 # them as a unit.
 # =============================================================================
 
-resource "kubectl_manifest" "monitoring_netpol" {
-  yaml_body = yamlencode({
-    apiVersion = "networking.k8s.io/v1"
-    kind       = "NetworkPolicy"
-    metadata = {
-      name      = "monitoring"
-      namespace = "monitoring"
-    }
-    spec = {
-      podSelector = {}
-      policyTypes = ["Ingress", "Egress"]
-
-      # --- Ingress: meshed + gateway-system ---
-      ingress = concat(local.app_common_ingress, [{
-        from = [{
-          namespaceSelector = {
-            matchLabels = {
-              "kubernetes.io/metadata.name" = "gateway-system"
-            }
-          }
-        }]
-      }])
-
-      # --- Egress: app_common_egress + scrape-specific allows ---
-      egress = concat(local.app_common_egress, [
-        # All-namespaces scrape: common Prometheus scrape ports.
-        # The list is EXPLICIT (not just "any port everywhere") so
-        # a future Prometheus exploit attempting connections on
-        # arbitrary ports (e.g., postgres, redis) gets blocked at
-        # L3.
-        {
-          to = [{
-            namespaceSelector = {} # all namespaces, including unmeshed
-          }]
-          ports = [
-            { protocol = "TCP", port = 9100 },  # node-exporter
-            { protocol = "TCP", port = 10250 }, # kubelet
-            { protocol = "TCP", port = 10257 }, # kube-controller-manager
-            { protocol = "TCP", port = 10259 }, # kube-scheduler
-            { protocol = "TCP", port = 9402 },  # cert-manager
-            { protocol = "TCP", port = 9090 },  # prometheus self
-            { protocol = "TCP", port = 8080 },  # kube-state-metrics, others
-            { protocol = "TCP", port = 8443 },  # vault, other TLS-metrics
-            { protocol = "TCP", port = 15090 }, # istio-proxy sidecar metrics
-            { protocol = "TCP", port = 15014 }, # istiod control-plane metrics
-            { protocol = "TCP", port = 15020 }, # istio-agent merged metrics
-            # Add new scrape ports here as ServiceMonitors are added.
-          ]
-        },
-      ])
-    }
-  })
-
-  depends_on = [
-    helm_release.kube_prometheus_stack,
-    helm_release.istiod,
-  ]
-}
