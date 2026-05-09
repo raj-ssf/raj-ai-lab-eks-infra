@@ -5,9 +5,10 @@ End-to-end record of migrating an EKS-based AI lab from
 to **Cilium native CNI + Cilium kubeProxyReplacement + Cilium Service
 Mesh + Cilium Gateway API + Karpenter on Fargate (hybrid)**.
 
-22 commits, 17 helm releases, 3 K8s ConfigMap dashboards, 5 EKS-managed
-addons, 4 CiliumNetworkPolicies, 5 Kyverno ClusterPolicies, 1 ScaledObject,
-1 ACM cert, 1 RDS instance, 1 S3 bucket, 16 architectural memories.
+33+ commits, 19 helm releases, 5 EKS-managed addons, 5 CiliumNetworkPolicies
+(4 L3/L4 + 1 L7), 6 Kyverno ClusterPolicies, 1 ScaledObject, 1 ACM cert,
+1 RDS Postgres, 2 S3 buckets, 4 ECR repos, 3 GHA OIDC IAM roles, ~30 Grafana
+dashboards, 18 architectural memories.
 
 ## Phase summary
 
