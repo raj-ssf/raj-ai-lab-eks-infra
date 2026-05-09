@@ -225,6 +225,80 @@ resource "kubectl_manifest" "cert_manager_webhook_cnp" {
 }
 
 # =============================================================================
+# Phase 5f: L7-aware CNP — HTTP-method enforcement on argo-rollouts-dashboard.
+#
+# argo-rollouts-dashboard has NO native auth (Phase 4d documented this gap).
+# Adding L7 GET-only enforcement at the network layer = defense in depth:
+# even if an attacker reaches the dashboard, they can only READ, not
+# mutate. (The dashboard is read-only by design too, but pinning at L7
+# means a future bug in the dashboard that adds a write endpoint
+# wouldn't accidentally expose mutation.)
+#
+# How L7 enforcement works in Cilium 1.16:
+#   - CiliumNetworkPolicy with `toPorts.rules.http` clauses tells Cilium
+#     to redirect matching traffic through cilium-envoy (the L7 proxy
+#     DaemonSet, already running on every EC2 worker since Phase 1a).
+#   - Envoy parses the HTTP request, matches against the rules
+#     (method, path, host header), and ACCEPTS or DENIES with a
+#     synthetic 403.
+#   - Hubble flows show the L7 verdict + the actual HTTP method/path
+#     that triggered it: `hubble observe --type l7`.
+#
+# Performance cost: ~50-200μs per request for L7 redirect (Envoy
+# parses + emits flow event). For low-traffic dashboards, negligible.
+# For high-volume API services, only enforce L7 on egress paths that
+# need it — not blanket "all HTTP" enforcement.
+# =============================================================================
+
+resource "kubectl_manifest" "rollouts_dashboard_l7_cnp" {
+  yaml_body = yamlencode({
+    apiVersion = "cilium.io/v2"
+    kind       = "CiliumNetworkPolicy"
+    metadata = {
+      name      = "rollouts-dashboard-readonly"
+      namespace = "argo-rollouts"
+    }
+    spec = {
+      endpointSelector = {
+        matchLabels = {
+          "app.kubernetes.io/name" = "argo-rollouts-dashboard"
+        }
+      }
+      ingress = [{
+        # Allow only Cilium's gateway pods (in kube-system, where the
+        # cilium-envoy DaemonSet runs as the Gateway data plane) to
+        # reach the dashboard.
+        fromEndpoints = [{
+          matchLabels = {
+            "k8s:io.kubernetes.pod.namespace" = "kube-system"
+            "k8s:k8s-app"                     = "cilium-envoy"
+          }
+        }]
+        toPorts = [{
+          ports = [{
+            port     = "3100"
+            protocol = "TCP"
+          }]
+          # L7 HTTP rule — only GET allowed. Anything else gets a 403
+          # at Envoy. The dashboard's own JS bundle reads from /api/...
+          # via GET, so the UI keeps working.
+          rules = {
+            http = [{
+              method = "GET"
+            }]
+          }
+        }]
+      }]
+    }
+  })
+
+  depends_on = [
+    helm_release.cilium,
+    helm_release.argo_rollouts,
+  ]
+}
+
+# =============================================================================
 # Verification commands:
 #
 #   # See denied flows:
