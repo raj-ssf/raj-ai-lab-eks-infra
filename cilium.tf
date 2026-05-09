@@ -148,22 +148,27 @@ resource "helm_release" "cilium" {
       }
 
       # ---------------------------------------------------------------------
-      # kubeProxyReplacement — Phase 1a leaves kube-proxy in place
+      # kubeProxyReplacement — Phase 5: full eBPF Service handling.
       # ---------------------------------------------------------------------
-      # Set to "true" in Phase 6 to remove kube-proxy DaemonSet entirely
-      # and let Cilium handle service load-balancing via eBPF. Until then,
-      # kube-proxy (installed via EKS addon in eks.tf) does service NAT.
-      kubeProxyReplacement = "false"
+      # Cilium 1.16 fully replaces kube-proxy. ClusterIP, NodePort, and
+      # LoadBalancer Services all routed via eBPF programs attached to
+      # node interfaces, no iptables NAT in the data path. Hubble flows
+      # show real source IPs (not kube-proxy's iptables rewrites).
+      #
+      # Order matters at the runtime level:
+      #   1. kpr=true is flipped here. Cilium-agent reload picks up the
+      #      new config and starts programming Service entries it didn't
+      #      previously own (ClusterIP, in addition to the NodePort it
+      #      already handled from Phase 3).
+      #   2. EKS managed kube-proxy addon is removed in eks.tf
+      #      (cluster_addons — alongside the earlier vpc-cni removal).
+      #   3. The kube-proxy DaemonSet ITSELF persists after EKS addon
+      #      removal (same trap as aws-node in Phase 1a — see
+      #      feedback_eks_addon_removal_leaves_daemonset). Manually
+      #      deleted post-apply.
+      kubeProxyReplacement = "true"
 
-      # Phase 3: enable Cilium's eBPF NodePort implementation in PARALLEL
-      # with kube-proxy. Cilium's Gateway API controller refuses to
-      # register the GatewayClass otherwise — it needs SOMETHING handling
-      # NodePort/LoadBalancer Service traffic in eBPF (kube-proxy alone
-      # doesn't provide hooks the Gateway controller can use). With both
-      # running, Cilium handles NodePort/LoadBalancer; kube-proxy still
-      # handles ClusterIP. The combo is officially supported per Cilium
-      # docs and is the recommended bridge mode for clusters that haven't
-      # yet flipped to full kubeProxyReplacement=true.
+      # nodePort.enabled stays true (still required even with full kpr).
       nodePort = {
         enabled = true
       }

@@ -103,10 +103,10 @@ module "eks" {
         EOT
       })
     }
-    kube-proxy = {
-      most_recent                 = true
-      resolve_conflicts_on_update = "OVERWRITE"
-    }
+    # kube-proxy REMOVED 2026-05-09 — Cilium kubeProxyReplacement=true
+    # takes over (cilium.tf). Note: removing the EKS addon doesn't
+    # delete the underlying DaemonSet — that needs a manual
+    # `kubectl delete daemonset -n kube-system kube-proxy` post-apply.
     # vpc-cni REMOVED 2026-05-08 — Cilium native CNI replaces it.
     # Cilium installs via helm in cilium.tf BEFORE Karpenter provisions
     # any EC2 nodes, so VPC CNI's IP-allocation role is fully replaced.
