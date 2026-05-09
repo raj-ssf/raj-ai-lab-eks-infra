@@ -52,12 +52,10 @@ resource "kubectl_manifest" "external_dns_cnp" {
       egress = [
         # DNS to coredns
         {
-          toEndpoints = [{
-            matchLabels = {
-              "k8s:io.kubernetes.pod.namespace" = "kube-system"
-              "k8s:k8s-app"                     = "kube-dns"
-            }
-          }]
+          # CoreDNS runs on Fargate (no Cilium agent → no Cilium identity →
+          # toEndpoints matchLabels fails). Use `toEntities: cluster`
+          # which includes Fargate pods. See feedback_cilium_cnp_fargate_dns.
+          toEntities = ["cluster", "world"]
           toPorts = [{
             ports = [
               { port = "53", protocol = "UDP" },
@@ -127,12 +125,10 @@ resource "kubectl_manifest" "cert_manager_controller_cnp" {
       }
       egress = [
         {
-          toEndpoints = [{
-            matchLabels = {
-              "k8s:io.kubernetes.pod.namespace" = "kube-system"
-              "k8s:k8s-app"                     = "kube-dns"
-            }
-          }]
+          # CoreDNS runs on Fargate (no Cilium agent → no Cilium identity →
+          # toEndpoints matchLabels fails). Use `toEntities: cluster`
+          # which includes Fargate pods. See feedback_cilium_cnp_fargate_dns.
+          toEntities = ["cluster", "world"]
           toPorts = [{
             ports = [
               { port = "53", protocol = "UDP" },
@@ -195,12 +191,10 @@ resource "kubectl_manifest" "cert_manager_webhook_cnp" {
       ]
       egress = [
         {
-          toEndpoints = [{
-            matchLabels = {
-              "k8s:io.kubernetes.pod.namespace" = "kube-system"
-              "k8s:k8s-app"                     = "kube-dns"
-            }
-          }]
+          # CoreDNS runs on Fargate (no Cilium agent → no Cilium identity →
+          # toEndpoints matchLabels fails). Use `toEntities: cluster`
+          # which includes Fargate pods. See feedback_cilium_cnp_fargate_dns.
+          toEntities = ["cluster", "world"]
           toPorts = [{
             ports = [
               { port = "53", protocol = "UDP" },
@@ -297,12 +291,10 @@ resource "kubectl_manifest" "argocd_cnp" {
       ]
       egress = [
         {
-          toEndpoints = [{
-            matchLabels = {
-              "k8s:io.kubernetes.pod.namespace" = "kube-system"
-              "k8s:k8s-app"                     = "kube-dns"
-            }
-          }]
+          # CoreDNS runs on Fargate (no Cilium agent → no Cilium identity →
+          # toEndpoints matchLabels fails). Use `toEntities: cluster`
+          # which includes Fargate pods. See feedback_cilium_cnp_fargate_dns.
+          toEntities = ["cluster", "world"]
           toPorts = [{
             ports = [
               { port = "53", protocol = "UDP" },
@@ -398,12 +390,10 @@ resource "kubectl_manifest" "langfuse_cnp" {
       ]
       egress = [
         {
-          toEndpoints = [{
-            matchLabels = {
-              "k8s:io.kubernetes.pod.namespace" = "kube-system"
-              "k8s:k8s-app"                     = "kube-dns"
-            }
-          }]
+          # CoreDNS runs on Fargate (no Cilium agent → no Cilium identity →
+          # toEndpoints matchLabels fails). Use `toEntities: cluster`
+          # which includes Fargate pods. See feedback_cilium_cnp_fargate_dns.
+          toEntities = ["cluster", "world"]
           toPorts = [{
             ports = [
               { port = "53", protocol = "UDP" },
@@ -504,12 +494,10 @@ resource "kubectl_manifest" "vault_cnp" {
       ]
       egress = [
         {
-          toEndpoints = [{
-            matchLabels = {
-              "k8s:io.kubernetes.pod.namespace" = "kube-system"
-              "k8s:k8s-app"                     = "kube-dns"
-            }
-          }]
+          # CoreDNS runs on Fargate (no Cilium agent → no Cilium identity →
+          # toEndpoints matchLabels fails). Use `toEntities: cluster`
+          # which includes Fargate pods. See feedback_cilium_cnp_fargate_dns.
+          toEntities = ["cluster", "world"]
           toPorts = [{
             ports = [
               { port = "53", protocol = "UDP" },
@@ -597,12 +585,10 @@ resource "kubectl_manifest" "keycloak_cnp" {
       ]
       egress = [
         {
-          toEndpoints = [{
-            matchLabels = {
-              "k8s:io.kubernetes.pod.namespace" = "kube-system"
-              "k8s:k8s-app"                     = "kube-dns"
-            }
-          }]
+          # CoreDNS runs on Fargate (no Cilium agent → no Cilium identity →
+          # toEndpoints matchLabels fails). Use `toEntities: cluster`
+          # which includes Fargate pods. See feedback_cilium_cnp_fargate_dns.
+          toEntities = ["cluster", "world"]
           toPorts = [{
             ports = [
               { port = "53", protocol = "UDP" },
@@ -690,12 +676,10 @@ resource "kubectl_manifest" "monitoring_cnp" {
       egress = [
         # DNS
         {
-          toEndpoints = [{
-            matchLabels = {
-              "k8s:io.kubernetes.pod.namespace" = "kube-system"
-              "k8s:k8s-app"                     = "kube-dns"
-            }
-          }]
+          # CoreDNS runs on Fargate (no Cilium agent → no Cilium identity →
+          # toEndpoints matchLabels fails). Use `toEntities: cluster`
+          # which includes Fargate pods. See feedback_cilium_cnp_fargate_dns.
+          toEntities = ["cluster", "world"]
           toPorts = [{
             ports = [
               { port = "53", protocol = "UDP" },
