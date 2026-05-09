@@ -250,6 +250,198 @@ resource "kubectl_manifest" "cert_manager_webhook_cnp" {
 # need it — not blanket "all HTTP" enforcement.
 # =============================================================================
 
+# --- vault namespace ---------------------------------------------------------
+# Vault has a 3-replica Raft cluster — pods need to talk to each other on
+# 8200 (API) and 8201 (Raft cluster). Plus AWS KMS for auto-unseal, K8s API
+# for service registration.
+#
+# Ingress: cilium-envoy gateway (when vault HTTPRoute exists post-DNS-cutover),
+# kube-apiserver (for any future webhook), intra-namespace (Raft peering).
+# Egress: kube-dns, AWS APIs (KMS), kube-apiserver.
+
+resource "kubectl_manifest" "vault_cnp" {
+  yaml_body = yamlencode({
+    apiVersion = "cilium.io/v2"
+    kind       = "CiliumNetworkPolicy"
+    metadata = {
+      name      = "vault"
+      namespace = "vault"
+    }
+    spec = {
+      endpointSelector = {}
+      ingress = [
+        # Intra-namespace traffic — Raft peering on 8201, API on 8200
+        # between vault-0/1/2.
+        {
+          fromEndpoints = [{
+            matchLabels = {
+              "k8s:io.kubernetes.pod.namespace" = "vault"
+            }
+          }]
+        },
+        # cilium-envoy gateway — for the future vault.${var.domain}
+        # HTTPRoute (currently no listener for vault, but pre-allow so
+        # adding the listener doesn't require CNP changes).
+        {
+          fromEndpoints = [{
+            matchLabels = {
+              "k8s:io.kubernetes.pod.namespace" = "kube-system"
+              "k8s:k8s-app"                     = "cilium-envoy"
+            }
+          }]
+        },
+        # kube-apiserver — for vault-agent-injector's MutatingAdmissionWebhook
+        # (the API server calls the webhook on every pod create in vault-
+        # annotated namespaces).
+        {
+          fromEntities = ["kube-apiserver"]
+        },
+        # Apps in other namespaces will need to reach Vault for KV reads.
+        # When apps come back (Phase 4e+), enumerate them here. Until then,
+        # allow ingress from the meshed app namespaces.
+        {
+          fromEndpoints = [{
+            matchExpressions = [{
+              key      = "k8s:io.kubernetes.pod.namespace"
+              operator = "In"
+              values   = ["argocd", "monitoring", "keycloak"]
+            }]
+          }]
+        },
+      ]
+      egress = [
+        {
+          toEndpoints = [{
+            matchLabels = {
+              "k8s:io.kubernetes.pod.namespace" = "kube-system"
+              "k8s:k8s-app"                     = "kube-dns"
+            }
+          }]
+          toPorts = [{
+            ports = [
+              { port = "53", protocol = "UDP" },
+              { port = "53", protocol = "TCP" },
+            ]
+          }]
+        },
+        # Pod Identity agent (Vault uses this to fetch its IAM creds for
+        # the KMS auto-unseal API call).
+        {
+          toEntities = ["host"]
+          toPorts = [{
+            ports = [{ port = "80", protocol = "TCP" }]
+          }]
+        },
+        # K8s API + AWS APIs (KMS for auto-unseal).
+        {
+          toEntities = ["kube-apiserver", "world"]
+          toPorts = [{
+            ports = [{ port = "443", protocol = "TCP" }]
+          }]
+        },
+        # Intra-namespace (Raft peering — outbound side).
+        {
+          toEndpoints = [{
+            matchLabels = {
+              "k8s:io.kubernetes.pod.namespace" = "vault"
+            }
+          }]
+        },
+      ]
+    }
+  })
+
+  depends_on = [
+    helm_release.cilium,
+    helm_release.vault,
+  ]
+}
+
+# --- keycloak namespace ------------------------------------------------------
+# Keycloak server + Postgres backing store. Server talks to Postgres on 5432
+# intra-namespace; serves login traffic on 8080 to cilium-envoy gateway.
+# Postgres needs no external egress beyond DNS.
+
+resource "kubectl_manifest" "keycloak_cnp" {
+  yaml_body = yamlencode({
+    apiVersion = "cilium.io/v2"
+    kind       = "CiliumNetworkPolicy"
+    metadata = {
+      name      = "keycloak-stack"
+      namespace = "keycloak"
+    }
+    spec = {
+      endpointSelector = {}
+      ingress = [
+        # cilium-envoy gateway for keycloak.${var.domain} HTTPRoute.
+        {
+          fromEndpoints = [{
+            matchLabels = {
+              "k8s:io.kubernetes.pod.namespace" = "kube-system"
+              "k8s:k8s-app"                     = "cilium-envoy"
+            }
+          }]
+        },
+        # Intra-namespace (Keycloak → Postgres).
+        {
+          fromEndpoints = [{
+            matchLabels = {
+              "k8s:io.kubernetes.pod.namespace" = "keycloak"
+            }
+          }]
+        },
+        # OIDC clients in other namespaces talking to Keycloak's
+        # /token, /userinfo, /.well-known endpoints.
+        {
+          fromEndpoints = [{
+            matchExpressions = [{
+              key      = "k8s:io.kubernetes.pod.namespace"
+              operator = "In"
+              values   = ["argocd", "monitoring", "langfuse"]
+            }]
+          }]
+        },
+      ]
+      egress = [
+        {
+          toEndpoints = [{
+            matchLabels = {
+              "k8s:io.kubernetes.pod.namespace" = "kube-system"
+              "k8s:k8s-app"                     = "kube-dns"
+            }
+          }]
+          toPorts = [{
+            ports = [
+              { port = "53", protocol = "UDP" },
+              { port = "53", protocol = "TCP" },
+            ]
+          }]
+        },
+        # K8s API (for service registration if any).
+        {
+          toEntities = ["kube-apiserver"]
+          toPorts = [{
+            ports = [{ port = "443", protocol = "TCP" }]
+          }]
+        },
+        # Intra-namespace (Keycloak → Postgres on 5432).
+        {
+          toEndpoints = [{
+            matchLabels = {
+              "k8s:io.kubernetes.pod.namespace" = "keycloak"
+            }
+          }]
+        },
+      ]
+    }
+  })
+
+  depends_on = [
+    helm_release.cilium,
+    helm_release.keycloak,
+  ]
+}
+
 # --- monitoring namespace -----------------------------------------------------
 # Prometheus has the broadest egress shape in the cluster — scrapes every
 # meshed AND unmeshed namespace plus per-node endpoints (kubelet:10250,
