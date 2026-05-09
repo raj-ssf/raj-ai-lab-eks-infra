@@ -166,7 +166,6 @@ resource "helm_release" "argocd" {
 
   depends_on = [
     module.eks,
-    helm_release.alb_controller,
     helm_release.cert_manager,
   ]
 }

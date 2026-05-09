@@ -77,7 +77,6 @@ resource "helm_release" "tempo" {
 
   depends_on = [
     helm_release.kube_prometheus_stack,    # metrics-generator needs Prometheus remote_write
-    helm_release.alb_controller,           # avoid webhook race (other Helm releases creating Services)
   ]
 }
 
