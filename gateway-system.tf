@@ -58,6 +58,11 @@ locals {
       hostnames        = ["argocd.${var.domain}"]
       cert_secret_name = "argocd-tls"
     }
+    keycloak = {
+      namespace        = "keycloak"
+      hostnames        = ["keycloak.${var.domain}"]
+      cert_secret_name = "keycloak-tls"
+    }
   }
 
   gateway_listener_specs = flatten([

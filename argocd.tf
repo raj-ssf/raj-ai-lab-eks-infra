@@ -18,6 +18,25 @@ resource "kubernetes_namespace" "argocd" {
   }
 }
 
+# Phase 4b: ArgoCD OIDC client secret from the Keycloak realm import.
+# argocd-secret is the chart-managed Secret holding sensitive ArgoCD config.
+# We patch it post-install with a `oidc.keycloak.clientSecret` key that
+# argocd-server reads via the $argocd-secret:oidc.keycloak.clientSecret
+# reference in the cm.oidc.config below.
+resource "kubernetes_secret_v1" "argocd_keycloak_oidc" {
+  metadata {
+    name      = "argocd-keycloak-oidc"
+    namespace = kubernetes_namespace.argocd.metadata[0].name
+    labels = {
+      "app.kubernetes.io/part-of" = "argocd"
+    }
+  }
+  data = {
+    clientSecret = random_password.keycloak_argocd_client_secret.result
+  }
+  type = "Opaque"
+}
+
 resource "helm_release" "argocd" {
   name       = "argocd"
   namespace  = kubernetes_namespace.argocd.metadata[0].name
@@ -35,10 +54,36 @@ resource "helm_release" "argocd" {
         }
 
         cm = {
-          # Canonical external URL — used for OIDC redirects (when wired in
-          # Phase 4b) and for the "[Login via Keycloak]" button. Setting it
-          # now so the value is stable across the OIDC enablement.
+          # Canonical external URL — used for OIDC redirects.
           url = "https://argocd.${var.domain}"
+
+          # Phase 4b: OIDC via Keycloak. clientSecret reads from the
+          # argocd-keycloak-oidc Secret (managed by terraform from the
+          # realm import's random_password output). The $<name>:<key>
+          # syntax is ArgoCD's way to reference any K8s Secret in the
+          # argocd ns.
+          "oidc.config" = yamlencode({
+            name            = "Keycloak"
+            issuer          = "https://keycloak.${var.domain}/realms/${var.cluster_name}"
+            clientID        = "argocd"
+            clientSecret    = "$argocd-keycloak-oidc:clientSecret"
+            requestedScopes = ["openid", "profile", "email"]
+            requestedIDTokenClaims = {
+              groups = { essential = true }
+            }
+          })
+        }
+
+        # RBAC: map Keycloak realm groups → ArgoCD built-in roles.
+        # The realm declares /argocd-admins + /argocd-viewers groups,
+        # and the demo user `raj` is in /argocd-admins.
+        rbac = {
+          "policy.default" = "role:readonly"
+          "policy.csv"     = <<-EOT
+            g, argocd-admins,  role:admin
+            g, argocd-viewers, role:readonly
+          EOT
+          scopes           = "[groups]"
         }
       }
 
@@ -86,6 +131,7 @@ resource "helm_release" "argocd" {
   depends_on = [
     module.eks,
     helm_release.cert_manager,
+    kubernetes_secret_v1.argocd_keycloak_oidc,
   ]
 }
 

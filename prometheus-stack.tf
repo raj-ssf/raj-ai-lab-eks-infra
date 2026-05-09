@@ -107,6 +107,20 @@ locals {
 # GF_SECURITY_ADMIN_PASSWORD__FILE env, not assertNoLeakedSecrets.
 # So the only paths are (a) drop GF_*_FILE and lose Vault, or (b)
 # explicitly manage the Secret. (b) wins.
+# Phase 4b: Grafana OIDC client secret from the Keycloak realm import.
+# Realm bootstraps a `grafana` OIDC client with this secret value; the
+# Grafana pod reads it via envValueFrom (set in helm values below).
+resource "kubernetes_secret_v1" "grafana_keycloak_oidc" {
+  metadata {
+    name      = "grafana-keycloak-oidc"
+    namespace = kubernetes_namespace.monitoring.metadata[0].name
+  }
+  data = {
+    clientSecret = random_password.keycloak_grafana_client_secret.result
+  }
+  type = "Opaque"
+}
+
 resource "kubernetes_secret_v1" "grafana_admin_credentials" {
   metadata {
     name      = "grafana-admin-credentials"
@@ -258,15 +272,18 @@ resource "helm_release" "kube_prometheus_stack" {
           }
         }
 
-        # Phase 2 (Cilium migration): Vault Agent Injector annotations
-        # removed — Vault not deployed yet. Admin password is read from
-        # admin.existingSecret (above) directly via the chart's standard
-        # GF_SECURITY_ADMIN_PASSWORD env wiring. OIDC client secret is
-        # not needed here because Phase 2 has no Keycloak deployed yet
-        # (auth.generic_oauth block is wired below but the empty/missing
-        # client secret just leaves the OIDC button unusable — the
-        # local admin login still works for lab access). When Vault
-        # comes back in Phase 5, restore the podAnnotations + env block.
+        # Phase 4b: OIDC client secret env from the grafana-keycloak-oidc
+        # k8s Secret (managed below from the realm import's random_password).
+        # When Vault lands in Phase 4c, this can be replaced by VSO without
+        # touching the helm release.
+        envValueFrom = {
+          GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET = {
+            secretKeyRef = {
+              name = "grafana-keycloak-oidc"
+              key  = "clientSecret"
+            }
+          }
+        }
 
         # Pre-declare the Tempo datasource via the sidecar (Tempo installed
         # by tempo.tf creates a ConfigMap with the Grafana label below).
@@ -524,6 +541,7 @@ resource "helm_release" "kube_prometheus_stack" {
     # sidecar containers fail with CreateContainerConfigError. See
     # comment block on the resource for full background.
     kubernetes_secret_v1.grafana_admin_credentials,
+    kubernetes_secret_v1.grafana_keycloak_oidc,
   ]
 }
 

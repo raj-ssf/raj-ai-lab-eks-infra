@@ -67,6 +67,32 @@ resource "kubectl_manifest" "hubble_ui_cert" {
   ]
 }
 
+resource "kubectl_manifest" "keycloak_cert" {
+  yaml_body = yamlencode({
+    apiVersion = "cert-manager.io/v1"
+    kind       = "Certificate"
+    metadata = {
+      name      = "keycloak-tls"
+      namespace = "keycloak"
+    }
+    spec = {
+      secretName = "keycloak-tls"
+      issuerRef = {
+        name  = "letsencrypt-prod"
+        kind  = "ClusterIssuer"
+        group = "cert-manager.io"
+      }
+      commonName = "keycloak.${var.domain}"
+      dnsNames   = ["keycloak.${var.domain}"]
+    }
+  })
+
+  depends_on = [
+    kubectl_manifest.gateway_api_crds,
+    kubernetes_namespace.keycloak,
+  ]
+}
+
 resource "kubectl_manifest" "argocd_cert" {
   yaml_body = yamlencode({
     apiVersion = "cert-manager.io/v1"
