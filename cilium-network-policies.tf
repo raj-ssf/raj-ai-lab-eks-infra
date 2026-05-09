@@ -250,6 +250,199 @@ resource "kubectl_manifest" "cert_manager_webhook_cnp" {
 # need it — not blanket "all HTTP" enforcement.
 # =============================================================================
 
+# --- argocd namespace --------------------------------------------------------
+# argocd-server + applicationset-controller + app-controller +
+# notifications-controller + dex-server + repo-server + redis-ha-haproxy +
+# 3-pod redis-ha-server (Sentinel cluster).
+#
+# Empty podSelector — all argocd ns pods share the same logical workload
+# boundary (single helm release). Egress is broad: argocd-server pulls
+# from git (ssh:22 + https:443), repo-server uses git too, dex talks to
+# Keycloak. All also need to reach K8s API (lots of CRD watches).
+
+resource "kubectl_manifest" "argocd_cnp" {
+  yaml_body = yamlencode({
+    apiVersion = "cilium.io/v2"
+    kind       = "CiliumNetworkPolicy"
+    metadata = {
+      name      = "argocd"
+      namespace = "argocd"
+    }
+    spec = {
+      endpointSelector = {}
+      ingress = [
+        # cilium-envoy gateway for argocd.${var.domain} HTTPRoute
+        {
+          fromEndpoints = [{
+            matchLabels = {
+              "k8s:io.kubernetes.pod.namespace" = "kube-system"
+              "k8s:k8s-app"                     = "cilium-envoy"
+            }
+          }]
+        },
+        # kube-apiserver — for ArgoCD's many CRD watch streams (it's a
+        # heavy K8s API consumer)
+        {
+          fromEntities = ["kube-apiserver"]
+        },
+        # Intra-namespace (every component talks to redis-ha-haproxy +
+        # repo-server)
+        {
+          fromEndpoints = [{
+            matchLabels = {
+              "k8s:io.kubernetes.pod.namespace" = "argocd"
+            }
+          }]
+        },
+      ]
+      egress = [
+        {
+          toEndpoints = [{
+            matchLabels = {
+              "k8s:io.kubernetes.pod.namespace" = "kube-system"
+              "k8s:k8s-app"                     = "kube-dns"
+            }
+          }]
+          toPorts = [{
+            ports = [
+              { port = "53", protocol = "UDP" },
+              { port = "53", protocol = "TCP" },
+            ]
+          }]
+        },
+        # K8s API (heavy CRD watches) + git over HTTPS + Keycloak OIDC.
+        # toEntities=world covers github.com:22 (ssh) + github.com:443
+        # (https) + Keycloak public hostname.
+        {
+          toEntities = ["kube-apiserver", "world"]
+          toPorts = [{
+            ports = [
+              { port = "443", protocol = "TCP" },
+              { port = "22", protocol = "TCP" },
+            ]
+          }]
+        },
+        # Intra-namespace
+        {
+          toEndpoints = [{
+            matchLabels = {
+              "k8s:io.kubernetes.pod.namespace" = "argocd"
+            }
+          }]
+        },
+        # ArgoCD reaches Keycloak's /.well-known via cluster DNS to
+        # the meshed keycloak namespace (when DNS is cut over) OR via
+        # the public hostname (today). Allow keycloak ns ingress.
+        {
+          toEndpoints = [{
+            matchLabels = {
+              "k8s:io.kubernetes.pod.namespace" = "keycloak"
+            }
+          }]
+        },
+      ]
+    }
+  })
+
+  depends_on = [
+    helm_release.cilium,
+    helm_release.argocd,
+  ]
+}
+
+# --- langfuse namespace ------------------------------------------------------
+# Langfuse v3 — web + worker + 4 stateful subcharts (Postgres, ClickHouse,
+# Redis/Valkey, MinIO). All intra-namespace. Web tier accepts external
+# HTTPRoute traffic; worker has only outbound (S3 to MinIO, ClickHouse
+# inserts).
+
+resource "kubectl_manifest" "langfuse_cnp" {
+  yaml_body = yamlencode({
+    apiVersion = "cilium.io/v2"
+    kind       = "CiliumNetworkPolicy"
+    metadata = {
+      name      = "langfuse-stack"
+      namespace = "langfuse"
+    }
+    spec = {
+      endpointSelector = {}
+      ingress = [
+        {
+          fromEndpoints = [{
+            matchLabels = {
+              "k8s:io.kubernetes.pod.namespace" = "kube-system"
+              "k8s:k8s-app"                     = "cilium-envoy"
+            }
+          }]
+        },
+        # Intra-namespace (web → worker → ClickHouse → Postgres → MinIO,
+        # all in this ns).
+        {
+          fromEndpoints = [{
+            matchLabels = {
+              "k8s:io.kubernetes.pod.namespace" = "langfuse"
+            }
+          }]
+        },
+        # Apps (rag-service, langgraph-service) emit traces TO langfuse-web.
+        # When apps come online, langfuse-web receives their spans on /api/...
+        {
+          fromEndpoints = [{
+            matchExpressions = [{
+              key      = "k8s:io.kubernetes.pod.namespace"
+              operator = "In"
+              values   = ["rag", "langgraph", "chat", "ingestion", "llm"]
+            }]
+          }]
+        },
+      ]
+      egress = [
+        {
+          toEndpoints = [{
+            matchLabels = {
+              "k8s:io.kubernetes.pod.namespace" = "kube-system"
+              "k8s:k8s-app"                     = "kube-dns"
+            }
+          }]
+          toPorts = [{
+            ports = [
+              { port = "53", protocol = "UDP" },
+              { port = "53", protocol = "TCP" },
+            ]
+          }]
+        },
+        {
+          toEntities = ["kube-apiserver"]
+          toPorts = [{
+            ports = [{ port = "443", protocol = "TCP" }]
+          }]
+        },
+        # Keycloak for OIDC (when wired in Phase 4f)
+        {
+          toEndpoints = [{
+            matchLabels = {
+              "k8s:io.kubernetes.pod.namespace" = "keycloak"
+            }
+          }]
+        },
+        # Intra-namespace
+        {
+          toEndpoints = [{
+            matchLabels = {
+              "k8s:io.kubernetes.pod.namespace" = "langfuse"
+            }
+          }]
+        },
+      ]
+    }
+  })
+
+  depends_on = [
+    helm_release.cilium,
+    helm_release.langfuse,
+  ]
+}
+
 # --- vault namespace ---------------------------------------------------------
 # Vault has a 3-replica Raft cluster — pods need to talk to each other on
 # 8200 (API) and 8201 (Raft cluster). Plus AWS KMS for auto-unseal, K8s API
