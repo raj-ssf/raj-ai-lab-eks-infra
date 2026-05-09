@@ -178,9 +178,19 @@ resource "helm_release" "cilium" {
         enabled = true
         relay = {
           enabled = true
+          # Phase 2: pin to EC2 (Karpenter pool). Fargate would refuse
+          # WireGuard-encrypted traffic from cilium-agent, since Fargate
+          # has no agent / no WG peer. See eks.tf kube-system Fargate
+          # profile comment for the full reasoning.
+          nodeSelector = {
+            "karpenter.sh/nodepool" = "general"
+          }
         }
         ui = {
           enabled = true
+          nodeSelector = {
+            "karpenter.sh/nodepool" = "general"
+          }
         }
         metrics = {
           enabled = ["dns", "drop", "tcp", "flow", "icmp", "http"]

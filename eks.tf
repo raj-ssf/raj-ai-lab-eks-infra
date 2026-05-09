@@ -208,15 +208,17 @@ module "eks" {
     # computeType=Fargate so the addon removes the EC2 node affinity
     # that would otherwise prevent Fargate scheduling.
     #
-    # Hubble UI + Relay run on Fargate (regular Deployments, no IMDS or
-    # hostNetwork dependencies). They're targeted SPECIFICALLY by their
-    # individual labels — NOT via the broader app.kubernetes.io/part-of=cilium
-    # label, because that broader label would also match cilium-operator,
-    # and Fargate would CLAIM the operator pod (then refuse it because of
-    # hostNetwork=true) — once Fargate claims a pod, it doesn't release
-    # back to the default scheduler, so the operator stays Pending forever.
-    # The cilium operator stays off Fargate via its own targeting (cilium.tf
-    # operator block) AND via its absence from these selectors.
+    # Phase 2 (Cilium migration) revision: hubble-ui + hubble-relay
+    # selectors REMOVED. They were originally on Fargate (no IMDS or
+    # hostNetwork deps), but Cilium WireGuard nodeEncryption=true is
+    # incompatible with Fargate — Fargate pods have no cilium-agent
+    # locally, so they have no WireGuard peer to encrypt with. Traffic
+    # from a Fargate hubble-relay pod to the hubble-peer Service
+    # (which fronts cilium-agent on EC2 nodes) gets dropped on the
+    # receiving cilium-agent because traffic isn't WG-encrypted.
+    # Same story for any cross-node Fargate→EC2 service call.
+    # Moved hubble-relay + hubble-ui to EC2 via nodeSelector in
+    # cilium.tf so they share Cilium's encryption domain.
     kube-system = {
       name = "kube-system-bootstrap"
       selectors = [
@@ -224,14 +226,6 @@ module "eks" {
           namespace = "kube-system"
           labels    = { "k8s-app" = "kube-dns" }
         },
-        {
-          namespace = "kube-system"
-          labels    = { "app.kubernetes.io/name" = "hubble-ui" }
-        },
-        {
-          namespace = "kube-system"
-          labels    = { "app.kubernetes.io/name" = "hubble-relay" }
-        }
       ]
     }
   }

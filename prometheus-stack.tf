@@ -1,20 +1,8 @@
 resource "kubernetes_namespace" "monitoring" {
   metadata {
     name = "monitoring"
-    labels = {
-      # Phase #55: meshed for STRICT mTLS. Without the sidecar,
-      # Prometheus's HTTP scrape requests to meshed targets carry
-      # no SPIFFE identity → would fail at the destination Envoy
-      # under STRICT mode. Sidecar gives prometheus a SPIFFE cert
-      # so it can scrape any meshed /metrics over mTLS.
-      #
-      # Same logic for tempo, alertmanager, grafana — all in this
-      # namespace. After this label, Istio's mutating webhook
-      # injects istio-proxy on next pod create. Existing pods
-      # need a manual rollout (kubectl -n monitoring rollout
-      # restart deployment,statefulset) to pick up the sidecar.
-      "istio-injection" = "enabled"
-    }
+    # Phase 2 (Cilium migration): istio-injection label removed —
+    # Istio is gone. Phase 5 will add Cilium Service Mesh equivalent.
   }
 }
 
@@ -163,49 +151,9 @@ resource "helm_release" "kube_prometheus_stack" {
           probeSelectorNilUsesHelmValues          = false
           ruleSelectorNilUsesHelmValues           = false
 
-          # Hand-rolled scrape for Envoy sidecars. Can't use a PodMonitor —
-          # the operator auto-generates a `keep container_port_number==15090`
-          # relabel, and Prometheus 2.x pod-SD doesn't enumerate initContainer
-          # ports. Our istio-proxy runs as an init container with
-          # restartPolicy=Always (native sidecar), so that filter drops every
-          # target. This config overrides __address__ directly, no port-
-          # enumeration dependency.
-          additionalScrapeConfigs = [{
-            job_name     = "istio-envoy-stats"
-            metrics_path = "/stats/prometheus"
-            kubernetes_sd_configs = [{
-              role = "pod"
-              namespaces = {
-                names = ["rag", "qdrant", "keycloak", "argocd"]
-              }
-            }]
-            relabel_configs = [
-              {
-                action        = "drop"
-                source_labels = ["__meta_kubernetes_pod_phase"]
-                regex         = "(Failed|Succeeded|Pending)"
-              },
-              # Rewrite target address to pod_ip:15020. Port 15020 is
-              # istio-agent's merged Prometheus endpoint — emits istio_*
-              # telemetry (istio_requests_total etc.). Port 15090 is raw
-              # Envoy stats (envoy_* only) and wouldn't populate the Istio
-              # dashboards. Prometheus dedupes multiple targets with the
-              # same __address__, so we collapse to one per pod.
-              {
-                source_labels = ["__meta_kubernetes_pod_ip"]
-                target_label  = "__address__"
-                replacement   = "$${1}:15020"
-              },
-              {
-                source_labels = ["__meta_kubernetes_namespace"]
-                target_label  = "namespace"
-              },
-              {
-                source_labels = ["__meta_kubernetes_pod_name"]
-                target_label  = "pod"
-              },
-            ]
-          }]
+          # Phase 2 (Cilium migration): istio-envoy-stats scrape removed —
+          # Istio is gone. Phase 5 will replace with Cilium Hubble metrics
+          # (hubble metrics ServiceMonitor pulled from kube-system ns).
 
           retention = "7d"
 
@@ -310,35 +258,15 @@ resource "helm_release" "kube_prometheus_stack" {
           }
         }
 
-        # Vault Agent Injector: admin password and OIDC client secret come
-        # from Vault, written to /vault/secrets/* by the sidecar. Grafana's
-        # GF_*__FILE convention reads the values at startup.
-        podAnnotations = {
-          "vault.hashicorp.com/agent-inject" = "true"
-          "vault.hashicorp.com/role"         = "grafana"
-
-          "vault.hashicorp.com/agent-inject-secret-admin-password"   = "secret/data/grafana/admin"
-          "vault.hashicorp.com/agent-inject-template-admin-password" = <<-EOT
-            {{- with secret "secret/data/grafana/admin" -}}
-            {{ .Data.data.password }}
-            {{- end -}}
-          EOT
-
-          "vault.hashicorp.com/agent-inject-secret-oauth-client-secret"   = "secret/data/grafana/oidc"
-          "vault.hashicorp.com/agent-inject-template-oauth-client-secret" = <<-EOT
-            {{- with secret "secret/data/grafana/oidc" -}}
-            {{ .Data.data.client_secret }}
-            {{- end -}}
-          EOT
-        }
-
-        # GF_*__FILE (double underscore + FILE) reads the value from a path —
-        # overrides the plain GF_SECURITY_ADMIN_PASSWORD / GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET
-        # the chart injects from its own Secret.
-        env = {
-          GF_SECURITY_ADMIN_PASSWORD__FILE          = "/vault/secrets/admin-password"
-          GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET__FILE = "/vault/secrets/oauth-client-secret"
-        }
+        # Phase 2 (Cilium migration): Vault Agent Injector annotations
+        # removed — Vault not deployed yet. Admin password is read from
+        # admin.existingSecret (above) directly via the chart's standard
+        # GF_SECURITY_ADMIN_PASSWORD env wiring. OIDC client secret is
+        # not needed here because Phase 2 has no Keycloak deployed yet
+        # (auth.generic_oauth block is wired below but the empty/missing
+        # client secret just leaves the OIDC button unusable — the
+        # local admin login still works for lab access). When Vault
+        # comes back in Phase 5, restore the podAnnotations + env block.
 
         # Pre-declare the Tempo datasource via the sidecar (Tempo installed
         # by tempo.tf creates a ConfigMap with the Grafana label below).
@@ -538,6 +466,30 @@ resource "helm_release" "kube_prometheus_stack" {
       nodeExporter = {
         enabled = true
       }
+      # node-exporter is a DaemonSet — by default it tries to schedule on
+      # every node, including Fargate nodes which refuse it (not chargeable
+      # for hostPath / hostPort capabilities). Without exclusion, 3 pods
+      # stay Pending forever as cosmetic noise. Same nodeAffinity pattern
+      # as cilium agent (see cilium.tf:253) — pin to Karpenter-managed
+      # EC2 nodes only.
+      "prometheus-node-exporter" = {
+        affinity = {
+          nodeAffinity = {
+            requiredDuringSchedulingIgnoredDuringExecution = {
+              nodeSelectorTerms = [
+                {
+                  matchExpressions = [
+                    {
+                      key      = "karpenter.sh/nodepool"
+                      operator = "Exists"
+                    },
+                  ]
+                },
+              ]
+            }
+          }
+        }
+      }
       kubeStateMetrics = {
         enabled = true
       }
@@ -585,40 +537,11 @@ output "grafana_admin_password_hint" {
 # Sibling to the helm_release; see langfuse.tf for the pattern's rationale.
 # =============================================================================
 
-resource "kubectl_manifest" "grafana_httproute" {
-  yaml_body = yamlencode({
-    apiVersion = "gateway.networking.k8s.io/v1"
-    kind       = "HTTPRoute"
-    metadata = {
-      name      = "grafana"
-      namespace = "monitoring"
-      labels    = { app = "grafana" }
-    }
-    spec = {
-      parentRefs = [{
-        name        = "shared-gateway"
-        namespace   = "gateway-system"
-        sectionName = "grafana-https"
-      }]
-      hostnames = ["grafana.${var.domain}"]
-      rules = [{
-        matches = [{
-          path = { type = "PathPrefix", value = "/" }
-        }]
-        backendRefs = [{
-          # kube-prometheus-stack-grafana Service exposes port 80
-          # (named "http-web", targetPort 3000).
-          name = "kube-prometheus-stack-grafana"
-          port = 80
-        }]
-      }]
-    }
-  })
-
-  depends_on = [
-    helm_release.kube_prometheus_stack,
-  ]
-}
+# Phase 2 (Cilium migration): HTTPRoute deferred to Phase 3.
+# Phase 3 will install gateway-system namespace + shared-gateway
+# (Cilium GatewayClass) and re-enable this HTTPRoute. Until then,
+# Grafana is reachable via `kubectl port-forward -n monitoring
+# svc/kube-prometheus-stack-grafana 3000:80`.
 
 # =============================================================================
 # Phase #70g: NetworkPolicy for monitoring namespace.
