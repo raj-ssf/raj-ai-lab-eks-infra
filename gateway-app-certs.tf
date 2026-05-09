@@ -66,3 +66,29 @@ resource "kubectl_manifest" "hubble_ui_cert" {
     kubectl_manifest.gateway_api_crds,
   ]
 }
+
+resource "kubectl_manifest" "argocd_cert" {
+  yaml_body = yamlencode({
+    apiVersion = "cert-manager.io/v1"
+    kind       = "Certificate"
+    metadata = {
+      name      = "argocd-tls"
+      namespace = "argocd"
+    }
+    spec = {
+      secretName = "argocd-tls"
+      issuerRef = {
+        name  = "letsencrypt-prod"
+        kind  = "ClusterIssuer"
+        group = "cert-manager.io"
+      }
+      commonName = "argocd.${var.domain}"
+      dnsNames   = ["argocd.${var.domain}"]
+    }
+  })
+
+  depends_on = [
+    kubectl_manifest.gateway_api_crds,
+    kubernetes_namespace.argocd,
+  ]
+}

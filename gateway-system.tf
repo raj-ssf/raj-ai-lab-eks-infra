@@ -53,6 +53,11 @@ locals {
       hostnames        = ["hubble.${var.domain}"]
       cert_secret_name = "hubble-ui-tls"
     }
+    argocd = {
+      namespace        = "argocd"
+      hostnames        = ["argocd.${var.domain}"]
+      cert_secret_name = "argocd-tls"
+    }
   }
 
   gateway_listener_specs = flatten([
