@@ -210,7 +210,6 @@ resource "helm_release" "langgraph_redis_ha" {
 
   depends_on = [
     module.eks,
-    helm_release.istiod,
     kubernetes_storage_class_v1.gp3,
     kubernetes_namespace.langgraph,
   ]
