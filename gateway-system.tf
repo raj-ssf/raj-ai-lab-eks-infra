@@ -119,9 +119,18 @@ resource "kubectl_manifest" "shared_gateway" {
       # Karpenter-managed nodes) handle it.
       infrastructure = {
         annotations = {
-          "service.beta.kubernetes.io/aws-load-balancer-type"            = "external"
-          "service.beta.kubernetes.io/aws-load-balancer-scheme"          = "internet-facing"
-          "service.beta.kubernetes.io/aws-load-balancer-nlb-target-type" = "ip"
+          "service.beta.kubernetes.io/aws-load-balancer-type"   = "external"
+          "service.beta.kubernetes.io/aws-load-balancer-scheme" = "internet-facing"
+          # target-type=instance (NOT ip): Cilium's gateway controller
+          # creates a Service with a sentinel endpoint 192.192.192.192:9999
+          # (its convention for "I own this Service; route through
+          # cilium-envoy"). AWS LBC with target-type=ip would try to
+          # register 192.192.192.192 as a real target and fail silently.
+          # With target-type=instance, AWS LBC registers EC2 nodes at the
+          # NodePort (31899), and Cilium's eBPF NodePort handler intercepts
+          # the inbound traffic on the node and routes through cilium-envoy
+          # locally → matching HTTPRoute → backend pod IP.
+          "service.beta.kubernetes.io/aws-load-balancer-nlb-target-type" = "instance"
           # Lab VPC has 1 public subnet (us-west-2a). Explicit allowlist
           # because the subnets aren't ELB-tagged.
           "service.beta.kubernetes.io/aws-load-balancer-subnets"                           = join(",", data.aws_subnets.public.ids)
