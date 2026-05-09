@@ -127,10 +127,17 @@ resource "helm_release" "cilium" {
       }
 
       # No overlay; route pod traffic via kernel routing on the ENI.
-      routingMode             = "native"
-      egressMasqueradeInterfaces = "eth0"
-      enableIPv4Masquerade    = true
-      tunnelProtocol          = ""
+      routingMode = "native"
+      # 2026-05-09: changed from "eth0" → "ens+" (regex). Amazon Linux 2023
+      # uses predictable interface names like ens5/ens6/ens7, not eth0.
+      # With "eth0" set, masquerade rules never matched, so pod egress to
+      # AWS APIs (ec2.us-west-2.amazonaws.com etc.) had source-IP issues
+      # or routing failures — EBS CSI controller couldn't reach EC2 API.
+      # "ens+" matches all ens* interfaces (the actual primary/secondary
+      # ENIs Cilium attaches in eni IPAM mode).
+      egressMasqueradeInterfaces = "ens+"
+      enableIPv4Masquerade       = true
+      tunnelProtocol             = ""
 
       # ---------------------------------------------------------------------
       # Cluster identity (used by Hubble + ClusterMesh)
@@ -232,14 +239,17 @@ resource "helm_release" "cilium" {
       # ---------------------------------------------------------------------
 
       # ---------------------------------------------------------------------
-      # nodeAffinity — exclude Fargate nodes from the agent DaemonSet
+      # nodeAffinity — schedule on Karpenter-managed EC2 nodes only
       # ---------------------------------------------------------------------
-      # Without this, the DaemonSet controller creates a pod per node
-      # including Fargate nodes. Fargate refuses DaemonSet pods, so they
-      # sit Pending forever (cosmetic noise — confusing in monitoring).
-      # The DoesNotExist operator matches nodes that don't have the
-      # eks.amazonaws.com/compute-type key at all (EC2 nodes from
-      # Karpenter), and excludes nodes where it's set to "fargate".
+      # Originally tried "eks.amazonaws.com/compute-type DoesNotExist" but
+      # that label is set with a hashed value (e.g. "8778753898604093030")
+      # on some EC2 nodes, breaking the DoesNotExist check. Switching to
+      # "karpenter.sh/nodepool Exists" is unambiguous: every Karpenter-
+      # provisioned EC2 node has it; Fargate nodes don't.
+      #
+      # This also tightly aligns with the architecture: Karpenter manages
+      # all EC2 capacity in this cluster, so "Karpenter-managed" and
+      # "EC2 worker we want Cilium on" are synonymous.
       affinity = {
         nodeAffinity = {
           requiredDuringSchedulingIgnoredDuringExecution = {
@@ -247,8 +257,8 @@ resource "helm_release" "cilium" {
               {
                 matchExpressions = [
                   {
-                    key      = "eks.amazonaws.com/compute-type"
-                    operator = "DoesNotExist"
+                    key      = "karpenter.sh/nodepool"
+                    operator = "Exists"
                   },
                 ]
               },
@@ -257,7 +267,7 @@ resource "helm_release" "cilium" {
         }
       }
 
-      # Same exclusion for the envoy DaemonSet
+      # Same constraint for the envoy DaemonSet
       envoy = {
         affinity = {
           nodeAffinity = {
@@ -266,8 +276,8 @@ resource "helm_release" "cilium" {
                 {
                   matchExpressions = [
                     {
-                      key      = "eks.amazonaws.com/compute-type"
-                      operator = "DoesNotExist"
+                      key      = "karpenter.sh/nodepool"
+                      operator = "Exists"
                     },
                   ]
                 },
