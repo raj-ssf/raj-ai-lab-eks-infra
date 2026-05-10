@@ -50,6 +50,77 @@ resource "aws_ecr_lifecycle_policy" "langgraph_service" {
   })
 }
 
+# -----------------------------------------------------------------------------
+# Per-service GHA OIDC role for pushing langgraph-service images to ECR.
+# In the old cluster this lived in gha-oidc.tf; new cluster keeps it inline
+# (mirrors chat-ui.tf / ingestion-service.tf shape).
+# -----------------------------------------------------------------------------
+
+resource "aws_iam_role" "gha_langgraph_service" {
+  name        = "${var.cluster_name}-gha-langgraph-service"
+  description = "Assumed by GHA build-push-langgraph-service workflow to push images to ECR"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Principal = {
+        Federated = data.aws_iam_openid_connect_provider.github.arn
+      }
+      Action = "sts:AssumeRoleWithWebIdentity"
+      Condition = {
+        StringEquals = {
+          "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
+        }
+        StringLike = {
+          "token.actions.githubusercontent.com:sub" = "repo:${var.gha_repo_owner}/${var.gha_repo_name}:ref:refs/heads/main"
+        }
+      }
+    }]
+  })
+}
+
+resource "aws_iam_policy" "gha_langgraph_service_ecr" {
+  name        = "${var.cluster_name}-gha-langgraph-service-ecr"
+  description = "ECR push permissions for langgraph-service repo"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid      = "AuthToken"
+        Effect   = "Allow"
+        Action   = "ecr:GetAuthorizationToken"
+        Resource = "*"
+      },
+      {
+        Sid    = "PushToLanggraphServiceRepo"
+        Effect = "Allow"
+        Action = [
+          "ecr:BatchCheckLayerAvailability",
+          "ecr:BatchGetImage",
+          "ecr:CompleteLayerUpload",
+          "ecr:GetDownloadUrlForLayer",
+          "ecr:InitiateLayerUpload",
+          "ecr:PutImage",
+          "ecr:UploadLayerPart",
+        ]
+        Resource = aws_ecr_repository.langgraph_service.arn
+      },
+    ]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "gha_langgraph_service_ecr" {
+  role       = aws_iam_role.gha_langgraph_service.name
+  policy_arn = aws_iam_policy.gha_langgraph_service_ecr.arn
+}
+
+output "gha_langgraph_service_role_arn" {
+  value       = aws_iam_role.gha_langgraph_service.arn
+  description = "Set as the LANGGRAPH_AWS_ROLE_ARN repo variable in GitHub Actions"
+}
+
 output "langgraph_service_ecr_url" {
   value       = aws_ecr_repository.langgraph_service.repository_url
   description = "Use as the LANGGRAPH_ECR_REPOSITORY_URL GHA repo variable"
