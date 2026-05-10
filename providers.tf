@@ -82,11 +82,12 @@ provider "vault" {
 
 # GitHub provider used by argocd-webhook.tf to manage push-event webhooks
 # on raj-ssf/raj-ai-lab-eks and raj-ssf/raj-ai-lab-eks-infra. Auth via the
-# GITHUB_TOKEN env var — easiest to source from `gh auth token`:
-#   export GITHUB_TOKEN=$(gh auth token)
-#   terraform apply
+# GITHUB_TOKEN env var. The repos live under the `raj-ssf` user, but the
+# active gh CLI account is usually `raj-sf`, which has only pull access.
+# Source the per-user token explicitly:
+#   GITHUB_TOKEN=$(gh auth token --user raj-ssf) terraform apply
 # Token needs `admin:repo_hook` scope (creating/deleting repository webhooks).
-# A standard `gh auth login --scopes admin:repo_hook` token has it.
+# The keyring-stored raj-ssf token already has it; raj-sf does not.
 provider "github" {
   owner = "raj-ssf"
 }

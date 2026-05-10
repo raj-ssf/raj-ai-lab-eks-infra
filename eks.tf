@@ -81,14 +81,40 @@ module "eks" {
       # gateway-system) instead of the Istio Gateway Service the old
       # cluster used. For now (Phase 1a) keep the corefile minimal.
       configuration_values = jsonencode({
-        computeType = "Fargate"
+        # Phase 7 (post-cluster-soak): moved CoreDNS off Fargate to EC2.
+        # Fargate-hosted CoreDNS caused recurring outages — Karpenter's
+        # consolidation cycles Fargate-pod hosts, the new pod takes 60-90s
+        # to come up cold (Fargate firecracker boot), and during that
+        # window cluster DNS goes silent. Cascading failures: EBS CSI
+        # controllers, langfuse-web, prometheus, ArgoCD redis-ha all
+        # crashloop on dial-udp 172.20.0.10:53 timeouts. With computeType=
+        # ec2, CoreDNS lands on Karpenter EC2 nodes (faster reschedule,
+        # more replicas survive consolidation, no Fargate-Cilium identity
+        # gap from feedback_cilium_cnp_fargate_dns).
+        computeType = "ec2"
         corefile = <<-EOT
+          # In-cluster rewrite for OIDC hairpin. argocd-server, langfuse-web,
+          # and any other in-cluster OIDC clients query
+          # https://keycloak.ekstest.com/.well-known/openid-configuration.
+          # Without this rewrite, the request would resolve to the public NLB
+          # IP and try to hairpin (pod → NLB → istio-gateway → keycloak),
+          # which AWS NLB rejects with a "connection reset by peer". The
+          # rewrite resolves *.ekstest.com to the in-cluster
+          # istio-gateway service IP, which reaches the gateway data plane
+          # via cluster-internal routing — no NLB hop.
+          #
+          # Keycloak's KC_HOSTNAME is still https://keycloak.ekstest.com,
+          # so the issuer claim in tokens matches what the OIDC consumers
+          # validate. The rewrite is purely DNS-side (NOT a path/URL
+          # rewrite). External users hitting the same hostname go through
+          # public DNS → NLB → gateway → keycloak (works as before).
           .:53 {
               errors
               health {
                   lameduck 5s
               }
               ready
+              rewrite name regex (.*)\.ekstest\.com shared-gateway-istio.gateway-system.svc.cluster.local
               kubernetes cluster.local in-addr.arpa ip6.arpa {
                   pods insecure
                   fallthrough in-addr.arpa ip6.arpa
@@ -103,10 +129,10 @@ module "eks" {
         EOT
       })
     }
-    kube-proxy = {
-      most_recent                 = true
-      resolve_conflicts_on_update = "OVERWRITE"
-    }
+    # kube-proxy REMOVED 2026-05-09 — Cilium kubeProxyReplacement=true
+    # takes over (cilium.tf). Note: removing the EKS addon doesn't
+    # delete the underlying DaemonSet — that needs a manual
+    # `kubectl delete daemonset -n kube-system kube-proxy` post-apply.
     # vpc-cni REMOVED 2026-05-08 — Cilium native CNI replaces it.
     # Cilium installs via helm in cilium.tf BEFORE Karpenter provisions
     # any EC2 nodes, so VPC CNI's IP-allocation role is fully replaced.
@@ -208,15 +234,17 @@ module "eks" {
     # computeType=Fargate so the addon removes the EC2 node affinity
     # that would otherwise prevent Fargate scheduling.
     #
-    # Hubble UI + Relay run on Fargate (regular Deployments, no IMDS or
-    # hostNetwork dependencies). They're targeted SPECIFICALLY by their
-    # individual labels — NOT via the broader app.kubernetes.io/part-of=cilium
-    # label, because that broader label would also match cilium-operator,
-    # and Fargate would CLAIM the operator pod (then refuse it because of
-    # hostNetwork=true) — once Fargate claims a pod, it doesn't release
-    # back to the default scheduler, so the operator stays Pending forever.
-    # The cilium operator stays off Fargate via its own targeting (cilium.tf
-    # operator block) AND via its absence from these selectors.
+    # Phase 2 (Cilium migration) revision: hubble-ui + hubble-relay
+    # selectors REMOVED. They were originally on Fargate (no IMDS or
+    # hostNetwork deps), but Cilium WireGuard nodeEncryption=true is
+    # incompatible with Fargate — Fargate pods have no cilium-agent
+    # locally, so they have no WireGuard peer to encrypt with. Traffic
+    # from a Fargate hubble-relay pod to the hubble-peer Service
+    # (which fronts cilium-agent on EC2 nodes) gets dropped on the
+    # receiving cilium-agent because traffic isn't WG-encrypted.
+    # Same story for any cross-node Fargate→EC2 service call.
+    # Moved hubble-relay + hubble-ui to EC2 via nodeSelector in
+    # cilium.tf so they share Cilium's encryption domain.
     kube-system = {
       name = "kube-system-bootstrap"
       selectors = [
@@ -224,14 +252,6 @@ module "eks" {
           namespace = "kube-system"
           labels    = { "k8s-app" = "kube-dns" }
         },
-        {
-          namespace = "kube-system"
-          labels    = { "app.kubernetes.io/name" = "hubble-ui" }
-        },
-        {
-          namespace = "kube-system"
-          labels    = { "app.kubernetes.io/name" = "hubble-relay" }
-        }
       ]
     }
   }

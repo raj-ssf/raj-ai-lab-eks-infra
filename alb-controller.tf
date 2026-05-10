@@ -49,6 +49,19 @@ resource "helm_release" "alb_controller" {
     value = var.vpc_id
   }
 
+  # Disable backend SG management. The terraform-aws-modules/eks module
+  # re-tags 3 SGs (cluster SG + node SG + AWS-managed eks-cluster-sg)
+  # with `kubernetes.io/cluster/<name>=owned` on every apply, giving
+  # AWS LBC multiple cluster-tagged SGs per ENI. AWS LBC's
+  # ReconcileForNodePortEndpoints requires EXACTLY ONE — fails, never
+  # registers targets. With enableBackendSecurityGroup=false, AWS LBC
+  # skips the SG query. Node SG already permits intra-cluster traffic
+  # (terraform-aws-modules/eks default), so NodePort still works.
+  set {
+    name  = "enableBackendSecurityGroup"
+    value = "false"
+  }
+
   depends_on = [
     module.eks,
     aws_eks_pod_identity_association.alb_controller,

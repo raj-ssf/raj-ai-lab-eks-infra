@@ -30,9 +30,12 @@ path "sys/auth/*"                   { capabilities = ["create","read","update","
 path "sys/mounts"                   { capabilities = ["read","list"] }
 path "sys/mounts/*"                 { capabilities = ["create","read","update","delete","sudo"] }
 
-# Kubernetes auth: manage roles
-path "auth/kubernetes/role"         { capabilities = ["list"] }
-path "auth/kubernetes/role/*"       { capabilities = ["create","read","update","delete","list"] }
+# Kubernetes auth: enable backend + configure (TokenReview target) + manage roles.
+# Granting the parent path covers /config, /role, /role/<name> in one stroke
+# so future role/config additions don't need policy churn.
+path "auth/kubernetes/*"            { capabilities = ["create","read","update","delete","list"] }
+path "sys/auth/kubernetes"          { capabilities = ["create","read","update","delete","sudo"] }
+path "sys/auth/kubernetes/*"        { capabilities = ["create","read","update","delete","sudo"] }
 
 # AppRole: let terraform rotate its own / create new approles if needed later
 path "auth/approle/role"            { capabilities = ["list"] }

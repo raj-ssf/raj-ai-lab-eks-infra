@@ -71,10 +71,18 @@ resource "kubectl_manifest" "kyverno_verify_argocd_images" {
       # semver tag ref. Attempts to pull an unsigned ArgoCD image — e.g. a
       # fork, a malicious rebuild, or a stale unsigned pre-v2.8 version —
       # get rejected at admission.
-      validationFailureAction = "Enforce"
+      # Was "Enforce" — flipped to Audit on 2026-05-09 after the Cilium-
+      # CNP-DNS instability caused Kyverno's cosign verification (which
+      # reaches tuf-repo-cdn.sigstore.dev for Fulcio TUF roots) to
+      # repeatedly fail. Each fail = ArgoCD pod admission rejected =
+      # ArgoCD self-destructed across consolidation cycles. Audit mode
+      # produces PolicyReports without blocking admission. Re-flip to
+      # Enforce once Kyverno's TUF cache is warm AND egress to
+      # tuf-repo-cdn.sigstore.dev is verified working in CNPs.
+      validationFailureAction = "Audit"
       background              = true
       webhookTimeoutSeconds   = 30
-      failurePolicy           = "Fail"
+      failurePolicy           = "Ignore" # was Fail; pair with Audit
 
       rules = [
         {

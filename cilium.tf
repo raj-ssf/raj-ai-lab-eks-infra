@@ -109,7 +109,14 @@ resource "helm_release" "cilium" {
   chart      = "cilium"
   # Pinned. 1.16.x is the GA series with stable Gateway API + Cluster Mesh
   # support. 1.17 is in beta as of this writing — wait for GA before bumping.
-  version = "1.16.5"
+  # Bumped 1.16.5 → 1.16.19 on 2026-05-09 to fix a "0 redirects active"
+  # state where cilium-agent received CiliumEnvoyConfig from operator
+  # and envoy admin showed listeners/clusters loaded, but the eBPF
+  # Service-IP→envoy redirect rule was never programmed. NLB targets
+  # failed health checks → all *.${var.domain} returned 000/503.
+  # 1.16.19 contains fixes to the Gateway Controller + cell-driven
+  # service-state sync that may resolve.
+  version = "1.16.19"
 
   values = [
     yamlencode({
@@ -148,12 +155,32 @@ resource "helm_release" "cilium" {
       }
 
       # ---------------------------------------------------------------------
-      # kubeProxyReplacement — Phase 1a leaves kube-proxy in place
+      # kubeProxyReplacement — Phase 5: full eBPF Service handling.
       # ---------------------------------------------------------------------
-      # Set to "true" in Phase 6 to remove kube-proxy DaemonSet entirely
-      # and let Cilium handle service load-balancing via eBPF. Until then,
-      # kube-proxy (installed via EKS addon in eks.tf) does service NAT.
-      kubeProxyReplacement = "false"
+      # Cilium 1.16 fully replaces kube-proxy. ClusterIP, NodePort, and
+      # LoadBalancer Services all routed via eBPF programs attached to
+      # node interfaces, no iptables NAT in the data path. Hubble flows
+      # show real source IPs (not kube-proxy's iptables rewrites).
+      #
+      # Order matters at the runtime level:
+      #   1. kpr=true is flipped here. Cilium-agent reload picks up the
+      #      new config and starts programming Service entries it didn't
+      #      previously own (ClusterIP, in addition to the NodePort it
+      #      already handled from Phase 3).
+      #   2. EKS managed kube-proxy addon is removed in eks.tf
+      #      (cluster_addons — alongside the earlier vpc-cni removal).
+      #   3. The kube-proxy DaemonSet ITSELF persists after EKS addon
+      #      removal (same trap as aws-node in Phase 1a — see
+      #      feedback_eks_addon_removal_leaves_daemonset). Manually
+      #      deleted post-apply.
+      kubeProxyReplacement = "true"
+
+      # nodePort.enabled was a Phase 3 bridge artifact (when kpr=false).
+      # With kpr=true (Phase 5), it's redundant AND may interact badly with
+      # the Gateway API + external envoy + WireGuard combo, leaving
+      # cilium-agent in a "0 redirects active" state where Service-IP /
+      # NodePort traffic to the gateway envoy is never wired up. Removed
+      # 2026-05-09 troubleshooting NLB → cilium-envoy data path.
 
       # K8s API endpoint (required when kubeProxyReplacement is true; safe
       # to set always so flipping later doesn't need a values change).
@@ -178,9 +205,19 @@ resource "helm_release" "cilium" {
         enabled = true
         relay = {
           enabled = true
+          # Phase 2: pin to EC2 (Karpenter pool). Fargate would refuse
+          # WireGuard-encrypted traffic from cilium-agent, since Fargate
+          # has no agent / no WG peer. See eks.tf kube-system Fargate
+          # profile comment for the full reasoning.
+          nodeSelector = {
+            "karpenter.sh/nodepool" = "general"
+          }
         }
         ui = {
           enabled = true
+          nodeSelector = {
+            "karpenter.sh/nodepool" = "general"
+          }
         }
         metrics = {
           enabled = ["dns", "drop", "tcp", "flow", "icmp", "http"]
@@ -195,10 +232,14 @@ resource "helm_release" "cilium" {
       }
 
       # ---------------------------------------------------------------------
-      # Gateway API — controller is ready, no Gateway resources yet (Phase 3)
+      # Gateway API — DISABLED 2026-05-09. Cilium 1.16.x gateway controller
+      # had a persistent bug where cilium-agent never programmed the eBPF
+      # CEC → envoy redirect (cilium#45871). Switched to Istio Gateway API
+      # (gatewayClassName=istio); see istio.tf. Cilium continues to handle
+      # CNI + kpr + east-west via CNP + WireGuard + Hubble + Tetragon.
       # ---------------------------------------------------------------------
       gatewayAPI = {
-        enabled = true
+        enabled = false
       }
 
       # ---------------------------------------------------------------------
@@ -267,8 +308,15 @@ resource "helm_release" "cilium" {
         }
       }
 
-      # Same constraint for the envoy DaemonSet
+      # 2026-05-09: REVERTED back to external envoy DaemonSet after
+      # embedded mode (envoy.enabled=false) caused cilium-agent to drop
+      # ALL Service entries from its eBPF map (cluster-wide Service
+      # routing broke, not just gateway ingress). External envoy is the
+      # known-working configuration for this cluster's other paths.
+      # Gateway redirect programming bug remains unresolved; tracked
+      # separately for future investigation (Cilium issue tracker).
       envoy = {
+        enabled = true
         affinity = {
           nodeAffinity = {
             requiredDuringSchedulingIgnoredDuringExecution = {
@@ -311,4 +359,45 @@ resource "helm_release" "cilium" {
   wait    = false
   timeout = 600
   atomic  = false # don't auto-rollback; debug failures manually
+}
+
+# =============================================================================
+# Phase 3: HTTPRoute for hubble.${var.domain}. Routes external traffic
+# to the Hubble UI Service (hubble-ui) in kube-system.
+# =============================================================================
+
+resource "kubectl_manifest" "hubble_ui_httproute" {
+  yaml_body = yamlencode({
+    apiVersion = "gateway.networking.k8s.io/v1"
+    kind       = "HTTPRoute"
+    metadata = {
+      name      = "hubble-ui"
+      namespace = "kube-system"
+      labels    = { app = "hubble-ui" }
+    }
+    spec = {
+      parentRefs = [{
+        name        = "shared-gateway"
+        namespace   = "gateway-system"
+        sectionName = "hubble-https"
+      }]
+      hostnames = ["hubble.${var.domain}"]
+      rules = [{
+        matches = [{
+          path = { type = "PathPrefix", value = "/" }
+        }]
+        backendRefs = [{
+          # hubble-ui Service is shipped by the Cilium chart in
+          # kube-system. Default port is 80 (proxies to nginx → frontend).
+          name = "hubble-ui"
+          port = 80
+        }]
+      }]
+    }
+  })
+
+  depends_on = [
+    helm_release.cilium,
+    kubectl_manifest.shared_gateway,
+  ]
 }

@@ -58,7 +58,6 @@ resource "kubernetes_namespace" "presidio" {
       # Phase #73: meshed for STRICT mTLS. Both analyzer + anonymizer
       # are called by other meshed apps; mesh enforcement gives
       # SPIFFE-authenticated access without app-level auth.
-      "istio-injection" = "enabled"
     }
   }
 }
@@ -431,68 +430,6 @@ resource "kubernetes_horizontal_pod_autoscaler_v2" "presidio_anonymizer" {
       }
     }
   }
-}
-
-# --- Istio AuthorizationPolicy ------------------------------------------------
-# Only meshed app SAs that need PII redaction can call presidio. Today that's
-# langgraph-service (input redaction before LLM, output un-redaction after)
-# and chat-ui (could redact for display in audit logs). ingestion-service
-# included for future document-ingest PII redaction (PDFs that may contain
-# sensitive data before chunking/embedding).
-resource "kubectl_manifest" "presidio_authz_apps" {
-  yaml_body = yamlencode({
-    apiVersion = "security.istio.io/v1"
-    kind       = "AuthorizationPolicy"
-    metadata = {
-      name      = "allow-apps-to-presidio"
-      namespace = kubernetes_namespace.presidio.metadata[0].name
-    }
-    spec = {
-      action = "ALLOW"
-      rules = [{
-        from = [{
-          source = {
-            principals = [
-              "cluster.local/ns/langgraph/sa/langgraph-service",
-              "cluster.local/ns/chat/sa/chat-ui",
-              "cluster.local/ns/ingestion/sa/ingestion-service",
-            ]
-          }
-        }]
-      }]
-    }
-  })
-
-  depends_on = [
-    helm_release.istiod,
-    kubernetes_namespace.presidio,
-  ]
-}
-
-# --- NetworkPolicy ------------------------------------------------------------
-# Same meshed-app pattern as Phase #70f — namespace-wide selector, ingress
-# from meshed namespaces (Istio AuthZ filters L7), egress to common
-# destinations (DNS, istiod, K8s API).
-resource "kubectl_manifest" "presidio_netpol" {
-  yaml_body = yamlencode({
-    apiVersion = "networking.k8s.io/v1"
-    kind       = "NetworkPolicy"
-    metadata = {
-      name      = "presidio"
-      namespace = kubernetes_namespace.presidio.metadata[0].name
-    }
-    spec = {
-      podSelector = {} # all pods in presidio ns
-      policyTypes = ["Ingress", "Egress"]
-      ingress     = local.app_common_ingress
-      egress      = local.app_common_egress
-    }
-  })
-
-  depends_on = [
-    helm_release.istiod,
-    kubernetes_namespace.presidio,
-  ]
 }
 
 # --- Helpful output -----------------------------------------------------------

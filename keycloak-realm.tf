@@ -135,7 +135,10 @@ resource "kubernetes_config_map_v1" "keycloak_realm_import" {
     namespace = kubernetes_namespace.keycloak.metadata[0].name
   }
   data = {
-    "raj-ai-lab-eks-realm.json" = local.keycloak_realm_json
+    # Filename MUST match the realm name. Keycloak's importer strict-checks
+    # this and refuses to start otherwise:
+    # "File name / realm name mismatch. File name should be <realm>-realm.json"
+    "${var.cluster_name}-realm.json" = local.keycloak_realm_json
   }
 }
 

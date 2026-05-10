@@ -1,20 +1,8 @@
 resource "kubernetes_namespace" "monitoring" {
   metadata {
     name = "monitoring"
-    labels = {
-      # Phase #55: meshed for STRICT mTLS. Without the sidecar,
-      # Prometheus's HTTP scrape requests to meshed targets carry
-      # no SPIFFE identity → would fail at the destination Envoy
-      # under STRICT mode. Sidecar gives prometheus a SPIFFE cert
-      # so it can scrape any meshed /metrics over mTLS.
-      #
-      # Same logic for tempo, alertmanager, grafana — all in this
-      # namespace. After this label, Istio's mutating webhook
-      # injects istio-proxy on next pod create. Existing pods
-      # need a manual rollout (kubectl -n monitoring rollout
-      # restart deployment,statefulset) to pick up the sidecar.
-      "istio-injection" = "enabled"
-    }
+    # Phase 2 (Cilium migration): istio-injection label removed —
+    # Istio is gone. Phase 5 will add Cilium Service Mesh equivalent.
   }
 }
 
@@ -119,6 +107,20 @@ locals {
 # GF_SECURITY_ADMIN_PASSWORD__FILE env, not assertNoLeakedSecrets.
 # So the only paths are (a) drop GF_*_FILE and lose Vault, or (b)
 # explicitly manage the Secret. (b) wins.
+# Phase 4b: Grafana OIDC client secret from the Keycloak realm import.
+# Realm bootstraps a `grafana` OIDC client with this secret value; the
+# Grafana pod reads it via envValueFrom (set in helm values below).
+resource "kubernetes_secret_v1" "grafana_keycloak_oidc" {
+  metadata {
+    name      = "grafana-keycloak-oidc"
+    namespace = kubernetes_namespace.monitoring.metadata[0].name
+  }
+  data = {
+    clientSecret = random_password.keycloak_grafana_client_secret.result
+  }
+  type = "Opaque"
+}
+
 resource "kubernetes_secret_v1" "grafana_admin_credentials" {
   metadata {
     name      = "grafana-admin-credentials"
@@ -163,49 +165,9 @@ resource "helm_release" "kube_prometheus_stack" {
           probeSelectorNilUsesHelmValues          = false
           ruleSelectorNilUsesHelmValues           = false
 
-          # Hand-rolled scrape for Envoy sidecars. Can't use a PodMonitor —
-          # the operator auto-generates a `keep container_port_number==15090`
-          # relabel, and Prometheus 2.x pod-SD doesn't enumerate initContainer
-          # ports. Our istio-proxy runs as an init container with
-          # restartPolicy=Always (native sidecar), so that filter drops every
-          # target. This config overrides __address__ directly, no port-
-          # enumeration dependency.
-          additionalScrapeConfigs = [{
-            job_name     = "istio-envoy-stats"
-            metrics_path = "/stats/prometheus"
-            kubernetes_sd_configs = [{
-              role = "pod"
-              namespaces = {
-                names = ["rag", "qdrant", "keycloak", "argocd"]
-              }
-            }]
-            relabel_configs = [
-              {
-                action        = "drop"
-                source_labels = ["__meta_kubernetes_pod_phase"]
-                regex         = "(Failed|Succeeded|Pending)"
-              },
-              # Rewrite target address to pod_ip:15020. Port 15020 is
-              # istio-agent's merged Prometheus endpoint — emits istio_*
-              # telemetry (istio_requests_total etc.). Port 15090 is raw
-              # Envoy stats (envoy_* only) and wouldn't populate the Istio
-              # dashboards. Prometheus dedupes multiple targets with the
-              # same __address__, so we collapse to one per pod.
-              {
-                source_labels = ["__meta_kubernetes_pod_ip"]
-                target_label  = "__address__"
-                replacement   = "$${1}:15020"
-              },
-              {
-                source_labels = ["__meta_kubernetes_namespace"]
-                target_label  = "namespace"
-              },
-              {
-                source_labels = ["__meta_kubernetes_pod_name"]
-                target_label  = "pod"
-              },
-            ]
-          }]
+          # Phase 2 (Cilium migration): istio-envoy-stats scrape removed —
+          # Istio is gone. Phase 5 will replace with Cilium Hubble metrics
+          # (hubble metrics ServiceMonitor pulled from kube-system ns).
 
           retention = "7d"
 
@@ -310,34 +272,17 @@ resource "helm_release" "kube_prometheus_stack" {
           }
         }
 
-        # Vault Agent Injector: admin password and OIDC client secret come
-        # from Vault, written to /vault/secrets/* by the sidecar. Grafana's
-        # GF_*__FILE convention reads the values at startup.
-        podAnnotations = {
-          "vault.hashicorp.com/agent-inject" = "true"
-          "vault.hashicorp.com/role"         = "grafana"
-
-          "vault.hashicorp.com/agent-inject-secret-admin-password"   = "secret/data/grafana/admin"
-          "vault.hashicorp.com/agent-inject-template-admin-password" = <<-EOT
-            {{- with secret "secret/data/grafana/admin" -}}
-            {{ .Data.data.password }}
-            {{- end -}}
-          EOT
-
-          "vault.hashicorp.com/agent-inject-secret-oauth-client-secret"   = "secret/data/grafana/oidc"
-          "vault.hashicorp.com/agent-inject-template-oauth-client-secret" = <<-EOT
-            {{- with secret "secret/data/grafana/oidc" -}}
-            {{ .Data.data.client_secret }}
-            {{- end -}}
-          EOT
-        }
-
-        # GF_*__FILE (double underscore + FILE) reads the value from a path —
-        # overrides the plain GF_SECURITY_ADMIN_PASSWORD / GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET
-        # the chart injects from its own Secret.
-        env = {
-          GF_SECURITY_ADMIN_PASSWORD__FILE          = "/vault/secrets/admin-password"
-          GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET__FILE = "/vault/secrets/oauth-client-secret"
+        # Phase 4b: OIDC client secret env from the grafana-keycloak-oidc
+        # k8s Secret (managed below from the realm import's random_password).
+        # When Vault lands in Phase 4c, this can be replaced by VSO without
+        # touching the helm release.
+        envValueFrom = {
+          GF_AUTH_GENERIC_OAUTH_CLIENT_SECRET = {
+            secretKeyRef = {
+              name = "grafana-keycloak-oidc"
+              key  = "clientSecret"
+            }
+          }
         }
 
         # Pre-declare the Tempo datasource via the sidecar (Tempo installed
@@ -538,6 +483,30 @@ resource "helm_release" "kube_prometheus_stack" {
       nodeExporter = {
         enabled = true
       }
+      # node-exporter is a DaemonSet — by default it tries to schedule on
+      # every node, including Fargate nodes which refuse it (not chargeable
+      # for hostPath / hostPort capabilities). Without exclusion, 3 pods
+      # stay Pending forever as cosmetic noise. Same nodeAffinity pattern
+      # as cilium agent (see cilium.tf:253) — pin to Karpenter-managed
+      # EC2 nodes only.
+      "prometheus-node-exporter" = {
+        affinity = {
+          nodeAffinity = {
+            requiredDuringSchedulingIgnoredDuringExecution = {
+              nodeSelectorTerms = [
+                {
+                  matchExpressions = [
+                    {
+                      key      = "karpenter.sh/nodepool"
+                      operator = "Exists"
+                    },
+                  ]
+                },
+              ]
+            }
+          }
+        }
+      }
       kubeStateMetrics = {
         enabled = true
       }
@@ -572,6 +541,7 @@ resource "helm_release" "kube_prometheus_stack" {
     # sidecar containers fail with CreateContainerConfigError. See
     # comment block on the resource for full background.
     kubernetes_secret_v1.grafana_admin_credentials,
+    kubernetes_secret_v1.grafana_keycloak_oidc,
   ]
 }
 
@@ -583,6 +553,13 @@ output "grafana_admin_password_hint" {
 # =============================================================================
 # Phase 8 of Gateway API migration: HTTPRoute for grafana.ekstest.com.
 # Sibling to the helm_release; see langfuse.tf for the pattern's rationale.
+# =============================================================================
+
+# =============================================================================
+# Phase 3: HTTPRoute for grafana.${var.domain}. Sibling to the
+# helm_release; the route attaches to shared-gateway in gateway-system
+# via parentRefs.sectionName="grafana-https" (set in gateway-system.tf
+# listener spec for the grafana entry).
 # =============================================================================
 
 resource "kubectl_manifest" "grafana_httproute" {
@@ -617,6 +594,7 @@ resource "kubectl_manifest" "grafana_httproute" {
 
   depends_on = [
     helm_release.kube_prometheus_stack,
+    kubectl_manifest.shared_gateway,
   ]
 }
 
