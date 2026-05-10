@@ -13,6 +13,44 @@
 #   5. terraform apply  (applies this file + everything else)
 
 # =============================================================================
+# KV v2 secrets engine at `secret/`. Vault 1.18 ships with no mounts by
+# default, so this must be enabled before any vault_kv_secret_v2 write.
+# The bootstrap script's policy already grants CRUD on secret/data/* and
+# secret/metadata/*, but the policy is moot until the mount exists.
+# =============================================================================
+
+resource "vault_mount" "kv" {
+  path        = "secret"
+  type        = "kv-v2"
+  description = "KV v2 store for app secrets (grafana admin, keycloak admin/db, langfuse keys, OIDC client secrets, demo data)"
+}
+
+# =============================================================================
+# Kubernetes auth method. Vault validates k8s ServiceAccount tokens via the
+# cluster's TokenReview API. Vault Secrets Operator (VSO) and the Vault
+# Agent Injector both authenticate this way.
+#
+# disable_local_ca_jwt=false (default) tells Vault to read its OWN pod's
+# /var/run/secrets/kubernetes.io/serviceaccount/{token,ca.crt} at request
+# time — no need to plumb the CA through Terraform. This works because
+# Vault is in-cluster; if it ever moved out-of-cluster, we'd need to
+# stuff the CA cert in here explicitly.
+# =============================================================================
+
+resource "vault_auth_backend" "kubernetes" {
+  type        = "kubernetes"
+  path        = "kubernetes"
+  description = "Kubernetes auth — used by VSO + Vault Agent Injector"
+}
+
+resource "vault_kubernetes_auth_backend_config" "this" {
+  backend         = vault_auth_backend.kubernetes.path
+  kubernetes_host = "https://kubernetes.default.svc.cluster.local"
+  # disable_local_ca_jwt defaults to false → Vault uses its in-cluster
+  # SA token + CA cert when calling TokenReview. Leaving it unset.
+}
+
+# =============================================================================
 # Pilot: rag-service consumes a demo secret via Vault Agent Injector sidecar
 # =============================================================================
 
@@ -36,7 +74,7 @@ resource "vault_policy" "rag_service" {
 }
 
 resource "vault_kubernetes_auth_backend_role" "rag_service" {
-  backend                          = "kubernetes"
+  backend                          = vault_auth_backend.kubernetes.path
   role_name                        = "rag-service"
   bound_service_account_names      = ["rag-service"]
   bound_service_account_namespaces = ["rag"]
@@ -49,7 +87,7 @@ resource "vault_kubernetes_auth_backend_role" "rag_service" {
 # rendered into /vault/secrets/demo inside the rag-service container when
 # the pod is annotated with the vault.hashicorp.com/agent-inject-* keys.
 resource "vault_kv_secret_v2" "rag_service_demo" {
-  mount = "secret"
+  mount = vault_mount.kv.path
   name  = "rag-service/demo"
 
   data_json = jsonencode({
@@ -78,7 +116,7 @@ resource "vault_policy" "grafana" {
 }
 
 resource "vault_kubernetes_auth_backend_role" "grafana" {
-  backend                          = "kubernetes"
+  backend                          = vault_auth_backend.kubernetes.path
   role_name                        = "grafana"
   bound_service_account_names      = ["kube-prometheus-stack-grafana"]
   bound_service_account_namespaces = ["monitoring"]
@@ -92,7 +130,7 @@ resource "vault_kubernetes_auth_backend_role" "grafana" {
 # restart picks it up via the sidecar (but note: admin password lives in
 # Grafana's SQLite after first boot, so rotation needs a UI/API change too).
 resource "vault_kv_secret_v2" "grafana_admin" {
-  mount = "secret"
+  mount = vault_mount.kv.path
   name  = "grafana/admin"
 
   data_json = jsonencode({
@@ -105,7 +143,7 @@ resource "vault_kv_secret_v2" "grafana_admin" {
 # the pair). Here we deliver it to Grafana via sidecar instead of a k8s
 # Secret + envValueFrom.
 resource "vault_kv_secret_v2" "grafana_oidc" {
-  mount = "secret"
+  mount = vault_mount.kv.path
   name  = "grafana/oidc"
 
   data_json = jsonencode({
@@ -135,7 +173,7 @@ resource "vault_policy" "argocd" {
 }
 
 resource "vault_kubernetes_auth_backend_role" "argocd" {
-  backend                          = "kubernetes"
+  backend                          = vault_auth_backend.kubernetes.path
   role_name                        = "argocd"
   bound_service_account_names      = ["argocd-vso"]
   bound_service_account_namespaces = ["argocd"]
@@ -145,7 +183,7 @@ resource "vault_kubernetes_auth_backend_role" "argocd" {
 }
 
 resource "vault_kv_secret_v2" "argocd_oidc" {
-  mount = "secret"
+  mount = vault_mount.kv.path
   name  = "argocd/oidc"
 
   data_json = jsonencode({
@@ -177,7 +215,7 @@ resource "vault_policy" "keycloak_db" {
 }
 
 resource "vault_kubernetes_auth_backend_role" "keycloak_db" {
-  backend                          = "kubernetes"
+  backend                          = vault_auth_backend.kubernetes.path
   role_name                        = "keycloak-db"
   bound_service_account_names      = ["keycloak-vso"]
   bound_service_account_namespaces = ["keycloak"]
@@ -194,7 +232,7 @@ resource "vault_kubernetes_auth_backend_role" "keycloak_db" {
 # auth.existingSecret), Agent Injector for Keycloak (file via Quarkus
 # config-source).
 resource "vault_kubernetes_auth_backend_role" "keycloak_pod" {
-  backend                          = "kubernetes"
+  backend                          = vault_auth_backend.kubernetes.path
   role_name                        = "keycloak"
   bound_service_account_names      = ["keycloak"]
   bound_service_account_namespaces = ["keycloak"]
@@ -204,7 +242,7 @@ resource "vault_kubernetes_auth_backend_role" "keycloak_pod" {
 }
 
 resource "vault_kv_secret_v2" "keycloak_db" {
-  mount = "secret"
+  mount = vault_mount.kv.path
   name  = "keycloak/db"
 
   data_json = jsonencode({
@@ -217,7 +255,7 @@ resource "vault_kv_secret_v2" "keycloak_db" {
 # key "admin-password" by default. Same keycloak-db policy + vault auth role
 # covers this path since both are under secret/keycloak/*.
 resource "vault_kv_secret_v2" "keycloak_admin" {
-  mount = "secret"
+  mount = vault_mount.kv.path
   name  = "keycloak/admin"
 
   data_json = jsonencode({

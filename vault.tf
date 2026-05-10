@@ -2,12 +2,13 @@
 # Phase 4c: Vault — secrets engine with KMS auto-unseal.
 #
 # Differences from the original vault.tf in _disabled:
-#   - No HTTPRoute (deferred until vault.${var.domain} DNS cuts over).
-#     Access via `kubectl port-forward -n vault svc/vault 8200:8200`
-#     for now. The chart's HTTPRoute exposure can come back later.
 #   - No standard NetworkPolicies (Phase 5e replaced standard NPs with
 #     CNPs; vault CNP can be added to cilium-network-policies.tf later).
 #   - No depends_on on alb_controller (already deployed in Phase 3).
+#
+# 2026-05-10: HTTPRoute on vault.${var.domain} added (bottom of file)
+# now that we're bringing vault-config.tf back. Listener wired in
+# gateway-system.tf gateway_apps; cert in gateway-app-certs.tf.
 #
 # Bootstrap is a 2-step process:
 #   1. terraform apply — deploys 3 vault pods, all in `Running` but
@@ -172,4 +173,53 @@ output "vault_init_hint" {
     Save the 5 recovery keys + initial root token immediately.
     KMS auto-unseal handles subsequent unseals; recovery keys are break-glass only.
   EOT
+}
+
+# =============================================================================
+# HTTPRoute exposing the active leader on vault.${var.domain}.
+#
+# Backend is `vault-active` — the chart's leader-tracking Service whose
+# selector flips to whichever pod currently holds the raft lease. On
+# leader-election change, no HTTPRoute reconfig needed. We only route
+# port 8200 (HTTP API); 8201 is raft-internal TLS, never external.
+#
+# Listener `vault-https` lives on shared-gateway in gateway-system. The
+# Gateway terminates Let's Encrypt TLS using `vault-tls` Secret in this
+# namespace (cert-manager Certificate in gateway-app-certs.tf). The
+# cross-namespace Secret reference is authorized by the per-namespace
+# ReferenceGrant in gateway-system.tf.
+# =============================================================================
+
+resource "kubectl_manifest" "vault_httproute" {
+  yaml_body = yamlencode({
+    apiVersion = "gateway.networking.k8s.io/v1"
+    kind       = "HTTPRoute"
+    metadata = {
+      name      = "vault"
+      namespace = "vault"
+      labels    = { app = "vault" }
+    }
+    spec = {
+      parentRefs = [{
+        name        = "shared-gateway"
+        namespace   = "gateway-system"
+        sectionName = "vault-https"
+      }]
+      hostnames = ["vault.${var.domain}"]
+      rules = [{
+        matches = [{
+          path = { type = "PathPrefix", value = "/" }
+        }]
+        backendRefs = [{
+          name = "vault-active"
+          port = 8200
+        }]
+      }]
+    }
+  })
+
+  depends_on = [
+    helm_release.vault,
+    kubectl_manifest.shared_gateway,
+  ]
 }

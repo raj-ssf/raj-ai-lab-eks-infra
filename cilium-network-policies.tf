@@ -551,6 +551,20 @@ resource "kubectl_manifest" "vault_cnp" {
             ports = [{ port = "443", protocol = "TCP" }]
           }]
         },
+        # RDS Postgres for Vault's database secrets engine. The dynamic-creds
+        # backend (vault_database_secret_backend_connection.rds_postgres)
+        # opens a TCP/5432 connection to the RDS endpoint to verify credentials
+        # at config time and to issue ephemeral users on /database/creds/* reads.
+        # `toEntities: world` because the RDS Aurora endpoint resolves to a
+        # private IP outside the cluster pod CIDR. The RDS SG itself permits
+        # ingress only from the EKS node SG, so this isn't widening the
+        # blast radius beyond what AWS already enforces.
+        {
+          toEntities = ["world"]
+          toPorts = [{
+            ports = [{ port = "5432", protocol = "TCP" }]
+          }]
+        },
         # Intra-namespace (Raft peering — outbound side).
         {
           toEndpoints = [{

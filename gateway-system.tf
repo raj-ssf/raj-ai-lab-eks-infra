@@ -73,6 +73,11 @@ locals {
       hostnames        = ["rollouts.${var.domain}"]
       cert_secret_name = "rollouts-tls"
     }
+    vault = {
+      namespace        = "vault"
+      hostnames        = ["vault.${var.domain}"]
+      cert_secret_name = "vault-tls"
+    }
   }
 
   gateway_listener_specs = flatten([

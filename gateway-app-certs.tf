@@ -170,3 +170,29 @@ resource "kubectl_manifest" "argocd_cert" {
     kubernetes_namespace.argocd,
   ]
 }
+
+resource "kubectl_manifest" "vault_cert" {
+  yaml_body = yamlencode({
+    apiVersion = "cert-manager.io/v1"
+    kind       = "Certificate"
+    metadata = {
+      name      = "vault-tls"
+      namespace = "vault"
+    }
+    spec = {
+      secretName = "vault-tls"
+      issuerRef = {
+        name  = "letsencrypt-prod"
+        kind  = "ClusterIssuer"
+        group = "cert-manager.io"
+      }
+      commonName = "vault.${var.domain}"
+      dnsNames   = ["vault.${var.domain}"]
+    }
+  })
+
+  depends_on = [
+    kubectl_manifest.gateway_api_crds,
+    helm_release.vault,
+  ]
+}
