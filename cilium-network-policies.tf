@@ -630,13 +630,25 @@ resource "kubectl_manifest" "keycloak_cnp" {
           }]
         },
         # OIDC clients in other namespaces talking to Keycloak's
-        # /token, /userinfo, /.well-known endpoints.
+        # /token, /userinfo, /.well-known endpoints. 2026-05-10: added
+        # langgraph, chat, ingestion, rag, llm — these fetch JWKS at
+        # startup for Bearer-token validation, and chat-ui drives the
+        # browser through Keycloak login.
         {
           fromEndpoints = [{
             matchExpressions = [{
               key      = "k8s:io.kubernetes.pod.namespace"
               operator = "In"
-              values   = ["argocd", "monitoring", "langfuse"]
+              values = [
+                "argocd",
+                "monitoring",
+                "langfuse",
+                "langgraph",
+                "chat",
+                "ingestion",
+                "rag",
+                "llm",
+              ]
             }]
           }]
         },
