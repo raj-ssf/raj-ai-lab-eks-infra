@@ -63,8 +63,8 @@ resource "kubernetes_secret_v1_data" "argocd_webhook_secret" {
 # Two gitops repos to wire up. Add more here if the lab ever expands.
 locals {
   argocd_webhook_repos = {
-    "raj-ai-lab-eks"       = "raj-ai-lab-eks"
-    "raj-ai-lab-eks-infra" = "raj-ai-lab-eks-infra"
+    "raj-ai-lab-eks"       = "raj-ai-lab-eks"       # apps gitops repo
+    "raj-ai-lab-eks-infra" = "raj-ai-lab-eks-infra" # infra repo (still named -infra on GitHub; local dir was renamed -cilium-infra)
   }
 }
 
