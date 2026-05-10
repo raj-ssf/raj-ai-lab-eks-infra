@@ -20,6 +20,48 @@
 #     fresh images.
 # =============================================================================
 
+resource "kubectl_manifest" "qdrant_app" {
+  yaml_body = yamlencode({
+    apiVersion = "argoproj.io/v1alpha1"
+    kind       = "Application"
+    metadata = {
+      name      = "qdrant"
+      namespace = kubernetes_namespace.argocd.metadata[0].name
+      finalizers = [
+        "resources-finalizer.argocd.argoproj.io",
+      ]
+    }
+    spec = {
+      project = "default"
+      source = {
+        repoURL        = var.argocd_app_repo_url
+        targetRevision = "HEAD"
+        path           = "qdrant/overlays/dev"
+      }
+      destination = {
+        server    = "https://kubernetes.default.svc"
+        namespace = "qdrant"
+      }
+      syncPolicy = {
+        automated = {
+          prune    = true
+          selfHeal = true
+        }
+        syncOptions = [
+          "CreateNamespace=true",
+          "PrunePropagationPolicy=foreground",
+          "RespectIgnoreDifferences=true",
+        ]
+      }
+    }
+  })
+
+  depends_on = [
+    helm_release.argocd,
+    kubernetes_secret.argocd_app_repo,
+  ]
+}
+
 resource "kubectl_manifest" "hello_app" {
   yaml_body = yamlencode({
     apiVersion = "argoproj.io/v1alpha1"

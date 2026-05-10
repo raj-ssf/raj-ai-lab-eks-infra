@@ -196,3 +196,33 @@ resource "kubectl_manifest" "vault_cert" {
     helm_release.vault,
   ]
 }
+
+# SAN cert covering both hello hostnames. Single Secret consumed by both the
+# `hello-https` and `hello2-https` listeners on shared-gateway.
+resource "kubectl_manifest" "hello_cert" {
+  yaml_body = yamlencode({
+    apiVersion = "cert-manager.io/v1"
+    kind       = "Certificate"
+    metadata = {
+      name      = "hello-tls"
+      namespace = "default"
+    }
+    spec = {
+      secretName = "hello-tls"
+      issuerRef = {
+        name  = "letsencrypt-prod"
+        kind  = "ClusterIssuer"
+        group = "cert-manager.io"
+      }
+      commonName = "hello.${var.domain}"
+      dnsNames = [
+        "hello.${var.domain}",
+        "hello2.${var.domain}",
+      ]
+    }
+  })
+
+  depends_on = [
+    kubectl_manifest.gateway_api_crds,
+  ]
+}
