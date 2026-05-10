@@ -20,14 +20,8 @@
 # this file extends to allow the ingestion-service SA principal.
 # =============================================================================
 
-resource "kubernetes_namespace" "ingestion" {
-  metadata {
-    name = "ingestion"
-    labels = {
-      "istio-injection" = "enabled"
-    }
-  }
-}
+# Namespace `ingestion` is declared in namespaces.tf (no istio-injection label
+# — Cilium-era cluster uses Cilium WireGuard for east-west, not sidecar mesh).
 
 # -----------------------------------------------------------------------------
 # ECR repo + lifecycle
@@ -150,96 +144,6 @@ resource "keycloak_openid_client" "ingestion_service" {
   ]
 }
 
-# -----------------------------------------------------------------------------
-# AuthorizationPolicy: chat-ui → ingestion-service (cross-namespace ALLOW).
-#
-# chat-ui's /upload handler POSTs to ingestion-service. With cluster-wide
-# deny-all in effect, the ingestion ns needs to allowlist the chat-ui SA
-# principal. Same pattern as allow-langgraph-service in the langgraph ns.
-# -----------------------------------------------------------------------------
-
-resource "kubectl_manifest" "allow_chat_to_ingestion" {
-  yaml_body = yamlencode({
-    apiVersion = "security.istio.io/v1"
-    kind       = "AuthorizationPolicy"
-    metadata = {
-      name      = "allow-chat-ui"
-      namespace = "ingestion"
-    }
-    spec = {
-      action = "ALLOW"
-      rules = [
-        { from = [{ source = { principals = ["cluster.local/ns/chat/sa/chat-ui"] } }] },
-      ]
-    }
-  })
-  depends_on = [
-    helm_release.istiod,
-    kubectl_manifest.deny_all_mesh_wide,
-    kubernetes_namespace.ingestion,
-  ]
-}
-
-# -----------------------------------------------------------------------------
-# AuthorizationPolicy: ingestion-service → vllm-* in llm namespace.
-#
-# ingestion-service calls /v1/embeddings on vllm-bge-m3 to embed chunks
-# at write time. Same destination ns (llm) and same cross-ns allow shape
-# as the existing langgraph-service rule. Both rules coexist in the llm
-# ns under different metadata.name values.
-# -----------------------------------------------------------------------------
-
-resource "kubectl_manifest" "allow_ingestion_to_llm" {
-  yaml_body = yamlencode({
-    apiVersion = "security.istio.io/v1"
-    kind       = "AuthorizationPolicy"
-    metadata = {
-      name      = "allow-ingestion-service"
-      namespace = "llm"
-    }
-    spec = {
-      action = "ALLOW"
-      rules = [
-        { from = [{ source = { principals = ["cluster.local/ns/ingestion/sa/ingestion-service"] } }] },
-      ]
-    }
-  })
-  depends_on = [
-    helm_release.istiod,
-    kubectl_manifest.deny_all_mesh_wide,
-    kubernetes_namespace.ingestion,
-  ]
-}
-
-# -----------------------------------------------------------------------------
-# AuthorizationPolicy: ingestion-service → qdrant.
-#
-# ingestion-service writes chunks to Qdrant's `documents` collection.
-# qdrant's existing allow-rag-service-only is a single-source policy;
-# adding a parallel allow-ingestion-service rule lets both producers
-# write to qdrant without having to rewrite the existing policy.
-# Istio combines multiple ALLOW rules with OR semantics — either one
-# matching is sufficient.
-# -----------------------------------------------------------------------------
-
-resource "kubectl_manifest" "allow_ingestion_to_qdrant" {
-  yaml_body = yamlencode({
-    apiVersion = "security.istio.io/v1"
-    kind       = "AuthorizationPolicy"
-    metadata = {
-      name      = "allow-ingestion-service"
-      namespace = "qdrant"
-    }
-    spec = {
-      action = "ALLOW"
-      rules = [
-        { from = [{ source = { principals = ["cluster.local/ns/ingestion/sa/ingestion-service"] } }] },
-      ]
-    }
-  })
-  depends_on = [
-    helm_release.istiod,
-    kubectl_manifest.deny_all_mesh_wide,
-    kubernetes_namespace.ingestion,
-  ]
-}
+# Istio AuthorizationPolicy blocks (chat→ingestion, ingestion→llm, ingestion→qdrant)
+# removed — Cilium-era cluster has no sidecar mesh, so AuthZ has no enforcer.
+# Equivalent L3/L4 cross-namespace allow rules live in cilium-network-policies.tf.

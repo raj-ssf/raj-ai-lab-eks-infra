@@ -13,18 +13,10 @@
 # that's forwarded to langgraph-service /invoke as the Bearer token.
 # =============================================================================
 
-resource "kubernetes_namespace" "chat" {
-  metadata {
-    name = "chat"
-    labels = {
-      # Mesh injection: enabled. The Chainlit pod calls langgraph-service
-      # in another namespace, which is mTLS-strict; sidecar gives the
-      # call a SPIFFE identity that the langgraph-service AuthZ policy
-      # can match on.
-      "istio-injection" = "enabled"
-    }
-  }
-}
+# Namespace `chat` is declared in namespaces.tf (canonical). The Cilium-era
+# cluster doesn't use Istio sidecar injection (only gateway-level Istio for
+# north-south), so the istio-injection=enabled label from the original repo
+# was dropped. East-west mTLS happens via Cilium WireGuard.
 
 # -----------------------------------------------------------------------------
 # ECR repository for the chat-ui image (pushed by GHA, signed with cosign,
@@ -232,43 +224,7 @@ resource "random_password" "chainlit_auth_secret" {
   special = false
 }
 
-# -----------------------------------------------------------------------------
-# Cross-namespace AuthorizationPolicy: allow chat-ui → langgraph-service.
-#
-# chat-ui's Chainlit handler POSTs to https://langgraph.ekstest.com/invoke
-# with the user's Keycloak JWT. With cluster-wide deny-all in effect,
-# langgraph namespace's AuthZ policies need to explicitly allow the
-# chat-ui SA principal — same pattern as the existing rag-service rule
-# on qdrant and the langgraph rule on llm.
-# -----------------------------------------------------------------------------
-
-resource "kubectl_manifest" "allow_chat_to_langgraph" {
-  yaml_body = yamlencode({
-    apiVersion = "security.istio.io/v1"
-    kind       = "AuthorizationPolicy"
-    metadata = {
-      name      = "allow-chat-ui"
-      namespace = "langgraph"
-    }
-    spec = {
-      action = "ALLOW"
-      rules = [
-        {
-          from = [{
-            source = {
-              principals = [
-                "cluster.local/ns/chat/sa/chat-ui",
-              ]
-            }
-          }]
-        },
-      ]
-    }
-  })
-
-  depends_on = [
-    helm_release.istiod,
-    kubectl_manifest.deny_all_mesh_wide,
-    kubernetes_namespace.chat,
-  ]
-}
+# Istio AuthorizationPolicy block (chat-ui → langgraph) removed: this cluster
+# has no sidecar mesh (only gateway-level Istio), so AuthorizationPolicy CRs
+# would have no enforcer in the data path. Cross-namespace east-west auth is
+# enforced by CiliumNetworkPolicies in cilium-network-policies.tf instead.
