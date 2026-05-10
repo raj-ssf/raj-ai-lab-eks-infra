@@ -81,7 +81,17 @@ module "eks" {
       # gateway-system) instead of the Istio Gateway Service the old
       # cluster used. For now (Phase 1a) keep the corefile minimal.
       configuration_values = jsonencode({
-        computeType = "Fargate"
+        # Phase 7 (post-cluster-soak): moved CoreDNS off Fargate to EC2.
+        # Fargate-hosted CoreDNS caused recurring outages — Karpenter's
+        # consolidation cycles Fargate-pod hosts, the new pod takes 60-90s
+        # to come up cold (Fargate firecracker boot), and during that
+        # window cluster DNS goes silent. Cascading failures: EBS CSI
+        # controllers, langfuse-web, prometheus, ArgoCD redis-ha all
+        # crashloop on dial-udp 172.20.0.10:53 timeouts. With computeType=
+        # ec2, CoreDNS lands on Karpenter EC2 nodes (faster reschedule,
+        # more replicas survive consolidation, no Fargate-Cilium identity
+        # gap from feedback_cilium_cnp_fargate_dns).
+        computeType = "ec2"
         corefile = <<-EOT
           .:53 {
               errors

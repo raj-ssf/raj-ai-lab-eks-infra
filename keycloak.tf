@@ -84,6 +84,12 @@ resource "helm_release" "keycloak_postgres" {
         database       = "keycloak"
         existingSecret = kubernetes_secret_v1.keycloak_db_auth.metadata[0].name
       }
+      # Same Bitnami chart-shipped NP trap — disable. Phase 5e++'s
+      # keycloak-stack CNP covers the namespace with Fargate-friendly
+      # DNS rules (toEntities cluster+world).
+      networkPolicy = {
+        enabled = false
+      }
       primary = {
         persistence = {
           enabled      = true
@@ -224,6 +230,18 @@ resource "helm_release" "keycloak" {
       service = { type = "ClusterIP" }
 
       ingress = {
+        enabled = false
+      }
+
+      # Bitnami chart ships standard NetworkPolicies (keycloak +
+      # keycloak-postgres-postgresql) whose DNS rule uses
+      # toEndpoints.matchLabels k8s-app=kube-dns — fails to match
+      # Fargate-hosted CoreDNS (no Cilium identity for Fargate pods).
+      # Cilium enforces intersection of all NPs + CNPs, so the chart's
+      # NP wins-as-restriction. Disable; my CNP keycloak-stack
+      # (cilium-network-policies.tf) covers the keycloak namespace
+      # with proper toEntities cluster+world DNS.
+      networkPolicy = {
         enabled = false
       }
     })

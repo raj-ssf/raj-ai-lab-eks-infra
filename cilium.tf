@@ -109,7 +109,14 @@ resource "helm_release" "cilium" {
   chart      = "cilium"
   # Pinned. 1.16.x is the GA series with stable Gateway API + Cluster Mesh
   # support. 1.17 is in beta as of this writing — wait for GA before bumping.
-  version = "1.16.5"
+  # Bumped 1.16.5 → 1.16.19 on 2026-05-09 to fix a "0 redirects active"
+  # state where cilium-agent received CiliumEnvoyConfig from operator
+  # and envoy admin showed listeners/clusters loaded, but the eBPF
+  # Service-IP→envoy redirect rule was never programmed. NLB targets
+  # failed health checks → all *.${var.domain} returned 000/503.
+  # 1.16.19 contains fixes to the Gateway Controller + cell-driven
+  # service-state sync that may resolve.
+  version = "1.16.19"
 
   values = [
     yamlencode({
@@ -168,10 +175,12 @@ resource "helm_release" "cilium" {
       #      deleted post-apply.
       kubeProxyReplacement = "true"
 
-      # nodePort.enabled stays true (still required even with full kpr).
-      nodePort = {
-        enabled = true
-      }
+      # nodePort.enabled was a Phase 3 bridge artifact (when kpr=false).
+      # With kpr=true (Phase 5), it's redundant AND may interact badly with
+      # the Gateway API + external envoy + WireGuard combo, leaving
+      # cilium-agent in a "0 redirects active" state where Service-IP /
+      # NodePort traffic to the gateway envoy is never wired up. Removed
+      # 2026-05-09 troubleshooting NLB → cilium-envoy data path.
 
       # K8s API endpoint (required when kubeProxyReplacement is true; safe
       # to set always so flipping later doesn't need a values change).
@@ -298,8 +307,15 @@ resource "helm_release" "cilium" {
         }
       }
 
-      # Same constraint for the envoy DaemonSet
+      # 2026-05-09: REVERTED back to external envoy DaemonSet after
+      # embedded mode (envoy.enabled=false) caused cilium-agent to drop
+      # ALL Service entries from its eBPF map (cluster-wide Service
+      # routing broke, not just gateway ingress). External envoy is the
+      # known-working configuration for this cluster's other paths.
+      # Gateway redirect programming bug remains unresolved; tracked
+      # separately for future investigation (Cilium issue tracker).
       envoy = {
+        enabled = true
         affinity = {
           nodeAffinity = {
             requiredDuringSchedulingIgnoredDuringExecution = {

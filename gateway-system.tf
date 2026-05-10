@@ -135,6 +135,18 @@ resource "kubectl_manifest" "shared_gateway" {
           # because the subnets aren't ELB-tagged.
           "service.beta.kubernetes.io/aws-load-balancer-subnets"                           = join(",", data.aws_subnets.public.ids)
           "service.beta.kubernetes.io/aws-load-balancer-cross-zone-load-balancing-enabled" = "true"
+          # Skip AWS LBC's auto-management of backend SG rules. The
+          # terraform-aws-modules/eks module re-tags the cluster SG +
+          # node SG + AWS-managed eks-cluster-sg with kubernetes.io/
+          # cluster/<name>=owned on every apply, which gives AWS LBC
+          # multiple cluster-tagged SGs per ENI and breaks
+          # ReconcileForNodePortEndpoints with "expected exactly one
+          # securityGroup tagged...". Telling AWS LBC NOT to manage
+          # backend SG rules sidesteps the detection entirely. The
+          # node SG already permits all-protocols ingress within the
+          # cluster (terraform-aws-modules/eks default), so NodePort
+          # 31899 inbound from the NLB ENI works without explicit rule.
+          "service.beta.kubernetes.io/aws-load-balancer-manage-backend-security-group-rules" = "false"
         }
       }
       listeners = [
