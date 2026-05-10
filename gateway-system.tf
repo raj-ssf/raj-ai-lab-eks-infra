@@ -88,6 +88,26 @@ locals {
       hostnames        = ["hello.${var.domain}", "hello2.${var.domain}"]
       cert_secret_name = "hello-tls"
     }
+    rag = {
+      namespace        = "rag"
+      hostnames        = ["rag.${var.domain}"]
+      cert_secret_name = "rag-tls"
+    }
+    llm = {
+      namespace        = "llm"
+      hostnames        = ["llm.${var.domain}"]
+      cert_secret_name = "vllm-tls"
+    }
+    langgraph = {
+      namespace        = "langgraph"
+      hostnames        = ["langgraph.${var.domain}"]
+      cert_secret_name = "langgraph-service-tls"
+    }
+    chat = {
+      namespace        = "chat"
+      hostnames        = ["chat.${var.domain}"]
+      cert_secret_name = "chat-ui-tls"
+    }
   }
 
   gateway_listener_specs = flatten([

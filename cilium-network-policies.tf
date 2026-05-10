@@ -510,15 +510,26 @@ resource "kubectl_manifest" "vault_cnp" {
         {
           fromEntities = ["kube-apiserver"]
         },
-        # Apps in other namespaces will need to reach Vault for KV reads.
-        # When apps come back (Phase 4e+), enumerate them here. Until then,
-        # allow ingress from the meshed app namespaces.
+        # Apps in other namespaces reach Vault for KV reads via the
+        # vault-agent-injector init container pattern (POST to
+        # /v1/auth/kubernetes/login then GET /v1/secret/data/<path>).
+        # 2026-05-10: added rag, langgraph, chat, ingestion, llm — these
+        # services consume Vault-injected secrets at pod startup.
         {
           fromEndpoints = [{
             matchExpressions = [{
               key      = "k8s:io.kubernetes.pod.namespace"
               operator = "In"
-              values   = ["argocd", "monitoring", "keycloak"]
+              values = [
+                "argocd",
+                "monitoring",
+                "keycloak",
+                "rag",
+                "langgraph",
+                "chat",
+                "ingestion",
+                "llm",
+              ]
             }]
           }]
         },

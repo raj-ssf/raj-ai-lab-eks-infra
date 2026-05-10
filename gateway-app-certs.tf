@@ -197,6 +197,94 @@ resource "kubectl_manifest" "vault_cert" {
   ]
 }
 
+resource "kubectl_manifest" "rag_cert" {
+  yaml_body = yamlencode({
+    apiVersion = "cert-manager.io/v1"
+    kind       = "Certificate"
+    metadata = {
+      name      = "rag-tls"
+      namespace = "rag"
+    }
+    spec = {
+      secretName = "rag-tls"
+      issuerRef  = { name = "letsencrypt-prod", kind = "ClusterIssuer", group = "cert-manager.io" }
+      commonName = "rag.${var.domain}"
+      dnsNames   = ["rag.${var.domain}"]
+    }
+  })
+
+  depends_on = [
+    kubectl_manifest.gateway_api_crds,
+    kubernetes_namespace.rag,
+  ]
+}
+
+resource "kubectl_manifest" "vllm_cert" {
+  yaml_body = yamlencode({
+    apiVersion = "cert-manager.io/v1"
+    kind       = "Certificate"
+    metadata = {
+      name      = "vllm-tls"
+      namespace = "llm"
+    }
+    spec = {
+      secretName = "vllm-tls"
+      issuerRef  = { name = "letsencrypt-prod", kind = "ClusterIssuer", group = "cert-manager.io" }
+      commonName = "llm.${var.domain}"
+      dnsNames   = ["llm.${var.domain}"]
+    }
+  })
+
+  depends_on = [
+    kubectl_manifest.gateway_api_crds,
+    kubernetes_namespace.llm,
+  ]
+}
+
+resource "kubectl_manifest" "langgraph_cert" {
+  yaml_body = yamlencode({
+    apiVersion = "cert-manager.io/v1"
+    kind       = "Certificate"
+    metadata = {
+      name      = "langgraph-service-tls"
+      namespace = "langgraph"
+    }
+    spec = {
+      secretName = "langgraph-service-tls"
+      issuerRef  = { name = "letsencrypt-prod", kind = "ClusterIssuer", group = "cert-manager.io" }
+      commonName = "langgraph.${var.domain}"
+      dnsNames   = ["langgraph.${var.domain}"]
+    }
+  })
+
+  depends_on = [
+    kubectl_manifest.gateway_api_crds,
+    kubernetes_namespace.langgraph,
+  ]
+}
+
+resource "kubectl_manifest" "chat_ui_cert" {
+  yaml_body = yamlencode({
+    apiVersion = "cert-manager.io/v1"
+    kind       = "Certificate"
+    metadata = {
+      name      = "chat-ui-tls"
+      namespace = "chat"
+    }
+    spec = {
+      secretName = "chat-ui-tls"
+      issuerRef  = { name = "letsencrypt-prod", kind = "ClusterIssuer", group = "cert-manager.io" }
+      commonName = "chat.${var.domain}"
+      dnsNames   = ["chat.${var.domain}"]
+    }
+  })
+
+  depends_on = [
+    kubectl_manifest.gateway_api_crds,
+    kubernetes_namespace.chat,
+  ]
+}
+
 # SAN cert covering both hello hostnames. Single Secret consumed by both the
 # `hello-https` and `hello2-https` listeners on shared-gateway.
 resource "kubectl_manifest" "hello_cert" {
