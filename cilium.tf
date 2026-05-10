@@ -232,13 +232,14 @@ resource "helm_release" "cilium" {
       }
 
       # ---------------------------------------------------------------------
-      # Gateway API — Phase 3. Per-Gateway annotations are set via
-      # Gateway.spec.infrastructure.annotations (Gateway API spec v1.2)
-      # which Cilium propagates to the LoadBalancer Service it creates.
-      # See gateway-system.tf for the actual annotation values.
+      # Gateway API — DISABLED 2026-05-09. Cilium 1.16.x gateway controller
+      # had a persistent bug where cilium-agent never programmed the eBPF
+      # CEC → envoy redirect (cilium#45871). Switched to Istio Gateway API
+      # (gatewayClassName=istio); see istio.tf. Cilium continues to handle
+      # CNI + kpr + east-west via CNP + WireGuard + Hubble + Tetragon.
       # ---------------------------------------------------------------------
       gatewayAPI = {
-        enabled = true
+        enabled = false
       }
 
       # ---------------------------------------------------------------------

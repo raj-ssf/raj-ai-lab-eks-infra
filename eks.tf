@@ -93,12 +93,28 @@ module "eks" {
         # gap from feedback_cilium_cnp_fargate_dns).
         computeType = "ec2"
         corefile = <<-EOT
+          # In-cluster rewrite for OIDC hairpin. argocd-server, langfuse-web,
+          # and any other in-cluster OIDC clients query
+          # https://keycloak.ekstest.com/.well-known/openid-configuration.
+          # Without this rewrite, the request would resolve to the public NLB
+          # IP and try to hairpin (pod → NLB → istio-gateway → keycloak),
+          # which AWS NLB rejects with a "connection reset by peer". The
+          # rewrite resolves *.ekstest.com to the in-cluster
+          # istio-gateway service IP, which reaches the gateway data plane
+          # via cluster-internal routing — no NLB hop.
+          #
+          # Keycloak's KC_HOSTNAME is still https://keycloak.ekstest.com,
+          # so the issuer claim in tokens matches what the OIDC consumers
+          # validate. The rewrite is purely DNS-side (NOT a path/URL
+          # rewrite). External users hitting the same hostname go through
+          # public DNS → NLB → gateway → keycloak (works as before).
           .:53 {
               errors
               health {
                   lameduck 5s
               }
               ready
+              rewrite name regex (.*)\.ekstest\.com shared-gateway-istio.gateway-system.svc.cluster.local
               kubernetes cluster.local in-addr.arpa ip6.arpa {
                   pods insecure
                   fallthrough in-addr.arpa ip6.arpa

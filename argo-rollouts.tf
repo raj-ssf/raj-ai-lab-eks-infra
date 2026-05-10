@@ -114,9 +114,12 @@ resource "kubectl_manifest" "rollouts_httproute" {
           path = { type = "PathPrefix", value = "/" }
         }]
         backendRefs = [{
-          # argo-rollouts-dashboard Service exposes port 3100.
-          name = "argo-rollouts-dashboard"
-          port = 3100
+          # Routed through oauth2-proxy first (Keycloak OIDC). oauth2-proxy
+          # then forwards authenticated requests to argo-rollouts-dashboard:3100
+          # via its `--upstream` config (see oauth2-proxy.tf helm values).
+          # Closes the "no native auth" gap on the dashboard.
+          name = "oauth2-proxy"
+          port = 80
         }]
       }]
     }

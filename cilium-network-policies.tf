@@ -268,9 +268,11 @@ resource "kubectl_manifest" "argocd_cnp" {
         # cilium-envoy gateway for argocd.${var.domain} HTTPRoute
         {
           fromEndpoints = [{
+            # Both Cilium-envoy (old) and Istio gateway pods (new). Phase 5e
+            # CNPs originally hard-coded cilium-envoy; switching to a broader
+            # match so istio-proxy in gateway-system can reach backends.
             matchLabels = {
-              "k8s:io.kubernetes.pod.namespace" = "kube-system"
-              "k8s:k8s-app"                     = "cilium-envoy"
+              "k8s:io.kubernetes.pod.namespace" = "gateway-system"
             }
           }]
         },
@@ -332,6 +334,19 @@ resource "kubectl_manifest" "argocd_cnp" {
             }
           }]
         },
+        # CoreDNS rewrite resolves *.ekstest.com → istio-gateway Service
+        # in gateway-system. ArgoCD's OIDC discovery call goes through
+        # gateway pods (not directly to keycloak), so allow egress here.
+        {
+          toEndpoints = [{
+            matchLabels = {
+              "k8s:io.kubernetes.pod.namespace" = "gateway-system"
+            }
+          }]
+          toPorts = [{
+            ports = [{ port = "443", protocol = "TCP" }]
+          }]
+        },
       ]
     }
   })
@@ -361,9 +376,11 @@ resource "kubectl_manifest" "langfuse_cnp" {
       ingress = [
         {
           fromEndpoints = [{
+            # Both Cilium-envoy (old) and Istio gateway pods (new). Phase 5e
+            # CNPs originally hard-coded cilium-envoy; switching to a broader
+            # match so istio-proxy in gateway-system can reach backends.
             matchLabels = {
-              "k8s:io.kubernetes.pod.namespace" = "kube-system"
-              "k8s:k8s-app"                     = "cilium-envoy"
+              "k8s:io.kubernetes.pod.namespace" = "gateway-system"
             }
           }]
         },
@@ -423,6 +440,18 @@ resource "kubectl_manifest" "langfuse_cnp" {
             }
           }]
         },
+        # CoreDNS rewrite *.ekstest.com → istio-gateway Service. In-cluster
+        # OIDC discovery goes through gateway pods (not directly to keycloak).
+        {
+          toEndpoints = [{
+            matchLabels = {
+              "k8s:io.kubernetes.pod.namespace" = "gateway-system"
+            }
+          }]
+          toPorts = [{
+            ports = [{ port = "443", protocol = "TCP" }]
+          }]
+        },
       ]
     }
   })
@@ -467,9 +496,11 @@ resource "kubectl_manifest" "vault_cnp" {
         # adding the listener doesn't require CNP changes).
         {
           fromEndpoints = [{
+            # Both Cilium-envoy (old) and Istio gateway pods (new). Phase 5e
+            # CNPs originally hard-coded cilium-envoy; switching to a broader
+            # match so istio-proxy in gateway-system can reach backends.
             matchLabels = {
-              "k8s:io.kubernetes.pod.namespace" = "kube-system"
-              "k8s:k8s-app"                     = "cilium-envoy"
+              "k8s:io.kubernetes.pod.namespace" = "gateway-system"
             }
           }]
         },
@@ -557,9 +588,11 @@ resource "kubectl_manifest" "keycloak_cnp" {
         # cilium-envoy gateway for keycloak.${var.domain} HTTPRoute.
         {
           fromEndpoints = [{
+            # Both Cilium-envoy (old) and Istio gateway pods (new). Phase 5e
+            # CNPs originally hard-coded cilium-envoy; switching to a broader
+            # match so istio-proxy in gateway-system can reach backends.
             matchLabels = {
-              "k8s:io.kubernetes.pod.namespace" = "kube-system"
-              "k8s:k8s-app"                     = "cilium-envoy"
+              "k8s:io.kubernetes.pod.namespace" = "gateway-system"
             }
           }]
         },
@@ -611,6 +644,18 @@ resource "kubectl_manifest" "keycloak_cnp" {
             }
           }]
         },
+        # CoreDNS rewrite *.ekstest.com → istio-gateway Service. In-cluster
+        # OIDC discovery goes through gateway pods (not directly to keycloak).
+        {
+          toEndpoints = [{
+            matchLabels = {
+              "k8s:io.kubernetes.pod.namespace" = "gateway-system"
+            }
+          }]
+          toPorts = [{
+            ports = [{ port = "443", protocol = "TCP" }]
+          }]
+        },
       ]
     }
   })
@@ -652,9 +697,11 @@ resource "kubectl_manifest" "monitoring_cnp" {
         # external HTTPRoute traffic
         {
           fromEndpoints = [{
+            # Both Cilium-envoy (old) and Istio gateway pods (new). Phase 5e
+            # CNPs originally hard-coded cilium-envoy; switching to a broader
+            # match so istio-proxy in gateway-system can reach backends.
             matchLabels = {
-              "k8s:io.kubernetes.pod.namespace" = "kube-system"
-              "k8s:k8s-app"                     = "cilium-envoy"
+              "k8s:io.kubernetes.pod.namespace" = "gateway-system"
             }
           }]
         },
@@ -715,6 +762,18 @@ resource "kubectl_manifest" "monitoring_cnp" {
               { port = "10250", protocol = "TCP" }, # kubelet
               { port = "15020", protocol = "TCP" }, # istio-merged metrics (no longer relevant)
             ]
+          }]
+        },
+        # CoreDNS rewrite *.ekstest.com → istio-gateway Service. In-cluster
+        # OIDC discovery goes through gateway pods (not directly to keycloak).
+        {
+          toEndpoints = [{
+            matchLabels = {
+              "k8s:io.kubernetes.pod.namespace" = "gateway-system"
+            }
+          }]
+          toPorts = [{
+            ports = [{ port = "443", protocol = "TCP" }]
           }]
         },
       ]

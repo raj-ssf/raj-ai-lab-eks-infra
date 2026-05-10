@@ -110,43 +110,21 @@ resource "kubectl_manifest" "shared_gateway" {
       namespace = kubernetes_namespace.gateway_system.metadata[0].name
     }
     spec = {
-      gatewayClassName = "cilium"
-      # Gateway API v1.2 spec.infrastructure: annotations Cilium will
-      # propagate to the LoadBalancer Service it creates. We use these
-      # to tell AWS Load Balancer Controller (load-balancer-class) to
-      # provision an NLB instead of letting the in-tree service-controller
-      # (which has the "Multiple tagged security groups found" bug on
-      # Karpenter-managed nodes) handle it.
+      # 2026-05-09: switched from gatewayClassName=cilium to istio after
+      # cilium#45871 (Cilium agent never programmed CEC → eBPF redirect,
+      # NLB targets failed health checks, all *.${var.domain} URLs broken).
+      # Istio Gateway API uses the istio-ingress Deployment in this same
+      # namespace (created by helm_release.istio_gateway in istio.tf).
+      # The infrastructure.annotations block is left in place — Istio's
+      # Gateway controller propagates these to the istio-ingress Service.
+      gatewayClassName = "istio"
       infrastructure = {
         annotations = {
-          "service.beta.kubernetes.io/aws-load-balancer-type"   = "external"
-          "service.beta.kubernetes.io/aws-load-balancer-scheme" = "internet-facing"
-          # target-type=instance (NOT ip): Cilium's gateway controller
-          # creates a Service with a sentinel endpoint 192.192.192.192:9999
-          # (its convention for "I own this Service; route through
-          # cilium-envoy"). AWS LBC with target-type=ip would try to
-          # register 192.192.192.192 as a real target and fail silently.
-          # With target-type=instance, AWS LBC registers EC2 nodes at the
-          # NodePort (31899), and Cilium's eBPF NodePort handler intercepts
-          # the inbound traffic on the node and routes through cilium-envoy
-          # locally → matching HTTPRoute → backend pod IP.
-          "service.beta.kubernetes.io/aws-load-balancer-nlb-target-type" = "instance"
-          # Lab VPC has 1 public subnet (us-west-2a). Explicit allowlist
-          # because the subnets aren't ELB-tagged.
-          "service.beta.kubernetes.io/aws-load-balancer-subnets"                           = join(",", data.aws_subnets.public.ids)
+          "service.beta.kubernetes.io/aws-load-balancer-type"            = "external"
+          "service.beta.kubernetes.io/aws-load-balancer-scheme"          = "internet-facing"
+          "service.beta.kubernetes.io/aws-load-balancer-nlb-target-type" = "ip"
+          "service.beta.kubernetes.io/aws-load-balancer-subnets"         = join(",", data.aws_subnets.public.ids)
           "service.beta.kubernetes.io/aws-load-balancer-cross-zone-load-balancing-enabled" = "true"
-          # Skip AWS LBC's auto-management of backend SG rules. The
-          # terraform-aws-modules/eks module re-tags the cluster SG +
-          # node SG + AWS-managed eks-cluster-sg with kubernetes.io/
-          # cluster/<name>=owned on every apply, which gives AWS LBC
-          # multiple cluster-tagged SGs per ENI and breaks
-          # ReconcileForNodePortEndpoints with "expected exactly one
-          # securityGroup tagged...". Telling AWS LBC NOT to manage
-          # backend SG rules sidesteps the detection entirely. The
-          # node SG already permits all-protocols ingress within the
-          # cluster (terraform-aws-modules/eks default), so NodePort
-          # 31899 inbound from the NLB ENI works without explicit rule.
-          "service.beta.kubernetes.io/aws-load-balancer-manage-backend-security-group-rules" = "false"
         }
       }
       listeners = [
