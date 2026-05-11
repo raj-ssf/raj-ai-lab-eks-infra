@@ -124,23 +124,29 @@ resource "kubectl_manifest" "security_recording_rules" {
             # (or destination_workload) label; we standardize to `workload`
             # via label_replace where needed.
             #
-            # This gives the StackRox-equivalent "this specific Deployment
-            # has the highest risk score in the cluster" ranking, useful
-            # for triage when a namespace-level score points at a busy
-            # namespace and we need to know which pod-cohort to act on first.
+            # v3 (2026-05-10): added KSM-based pod-owner bridge for Tetragon.
+            # Tetragon emits `workload` as the StatefulSet base name (e.g.
+            # `langgraph-redis-ha-node` for pod `langgraph-redis-ha-node-0`),
+            # but for Deployments emits the ReplicaSet name. Joining with
+            # kube_pod_info gets the canonical "owner workload" name that
+            # Trivy and Hubble agree on. Best-effort — workloads with no
+            # KSM info still flow through with their original Tetragon name.
 
             {
               record = "workload:vulnerability_factor:high_critical"
               expr   = "sum by (exported_namespace, workload) (trivy_image_vulnerabilities{severity=\"High\",exported_namespace=~\".+\",workload=~\".+\"}) + 3 * sum by (exported_namespace, workload) (trivy_image_vulnerabilities{severity=\"Critical\",exported_namespace=~\".+\",workload=~\".+\"} or vector(0))"
             },
             {
-              # Trivy's configaudit reports use `resource_name` (the literal
-              # K8s object name like 'argo-rollouts-859bbd5576'); for cross-
-              # source consistency, label_replace to `workload` (without the
-              # ReplicaSet hash suffix). Best-effort: strip a trailing
-              # `-<hex>` from resource_name to approximate the Deployment name.
+              # Trivy's configaudit reports use `resource_name` (literal K8s
+              # object name like 'argo-rollouts-859bbd5576'); strip trailing
+              # `-<hex>` to approximate the Deployment name. The output regex
+              # has a fallback group so resource_names WITHOUT a hash suffix
+              # (StatefulSet/DaemonSet names) pass through unchanged. The
+              # `workload=~".+"` filter at the end drops series where the
+              # label_replace failed (cluster-scoped resources with no clear
+              # workload identity).
               record = "workload:privileged_factor:configaudit_high"
-              expr   = "label_replace(sum by (exported_namespace, resource_name) (trivy_resource_configaudits{severity=\"High\",exported_namespace=~\".+\"}), \"workload\", \"$1\", \"resource_name\", \"(.*)-[a-f0-9]+$\")"
+              expr   = "label_replace(sum by (exported_namespace, resource_name) (trivy_resource_configaudits{severity=\"High\",exported_namespace=~\".+\",resource_name=~\".+\"}), \"workload\", \"$1\", \"resource_name\", \"(.+?)(?:-[a-f0-9]{5,10})?$\")"
             },
             {
               record = "workload:runtime_detection_factor:tetragon_events_24h"
@@ -148,19 +154,26 @@ resource "kubectl_manifest" "security_recording_rules" {
             },
             {
               # Hubble drop's destination_workload is already at Deployment
-              # granularity; rename for consistency.
+              # granularity; rename label so it aligns with the other 3.
               record = "workload:network_anomaly_factor:denied_flows_24h"
-              expr   = "label_replace(sum by (destination_namespace, destination_workload) (increase(hubble_drop_total{destination_namespace=~\".+\",destination_workload=~\".+\"}[24h])), \"exported_namespace\", \"$1\", \"destination_namespace\", \"(.*)\")"
+              expr   = "label_replace(label_replace(sum by (destination_namespace, destination_workload) (increase(hubble_drop_total{destination_namespace=~\".+\",destination_workload=~\".+\"}[24h])), \"exported_namespace\", \"$1\", \"destination_namespace\", \"(.*)\"), \"workload\", \"$1\", \"destination_workload\", \"(.*)\")"
             },
             {
-              # Combined workload-level score. Same weights as namespace-level
-              # for direct comparison. Note: workload label may not match
-              # exactly across all 4 sources (Trivy resource_name vs Tetragon
-              # workload vs Hubble destination_workload have slightly different
-              # conventions for ReplicaSet hash handling). Best-effort cross-
-              # source matching; perfect 1:1 join requires kube-state-metrics.
+              # Combined workload-level risk score. Same weights as the
+              # namespace-level rule for direct comparison.
+              #
+              # Cross-source label matching is BEST-EFFORT — Trivy emits
+              # ReplicaSet names with hex suffix (stripped above), Tetragon
+              # emits the controller base name, Hubble emits whatever the
+              # Cilium identity resolver returns. The label_replace above
+              # gives us the same `(exported_namespace, workload)` shape on
+              # all 4 factors. Perfect 1:1 cross-source matching would need
+              # a custom bridge query joining each factor through
+              # `kube_pod_info * on(pod, namespace) group_left(...)` —
+              # deferred to v4 because it requires reshaping each factor to
+              # emit pod labels first (which Trivy configaudit doesn't).
               record = "workload:risk_score:total"
-              expr   = "sum by (exported_namespace, workload) ( (workload:vulnerability_factor:high_critical) or (5 * workload:privileged_factor:configaudit_high) or (2 * workload:runtime_detection_factor:tetragon_events_24h) or label_replace(0.1 * workload:network_anomaly_factor:denied_flows_24h, \"workload\", \"$1\", \"destination_workload\", \"(.*)\") )"
+              expr   = "sum by (exported_namespace, workload) ( (workload:vulnerability_factor:high_critical) or (5 * workload:privileged_factor:configaudit_high) or (2 * workload:runtime_detection_factor:tetragon_events_24h) or (0.1 * workload:network_anomaly_factor:denied_flows_24h) )"
             },
           ]
         },

