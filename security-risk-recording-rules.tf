@@ -50,15 +50,22 @@ resource "kubectl_manifest" "security_recording_rules" {
             # transforms (Trivy emits `workload`, Tetragon emits `pod`,
             # Hubble emits `destination_workload`) — defer to v2 of this
             # rule set.
+            # exported_namespace=~".+" filters out series without the label
+            # entirely (PromQL != "" only matches present-and-empty, not absent).
             {
               record = "namespace:vulnerability_factor:high_critical"
-              expr   = "sum by (exported_namespace) (trivy_image_vulnerabilities{severity=\"High\"}) + 3 * sum by (exported_namespace) (trivy_image_vulnerabilities{severity=\"Critical\"} or vector(0))"
+              expr   = "sum by (exported_namespace) (trivy_image_vulnerabilities{severity=\"High\",exported_namespace=~\".+\"}) + 3 * sum by (exported_namespace) (trivy_image_vulnerabilities{severity=\"Critical\",exported_namespace=~\".+\"} or vector(0))"
             },
 
             # ----- Factor 2: privileged-pod configuration findings -----
+            # Filter excludes cluster-scoped resources (ClusterRole,
+            # ClusterRoleBinding, etc.) which have no exported_namespace —
+            # they previously rolled into an unlabeled aggregate on the
+            # dashboard. Cluster-scoped configaudit findings will get their
+            # own panel in v2.
             {
               record = "namespace:privileged_factor:configaudit_high"
-              expr   = "sum by (exported_namespace) (trivy_resource_configaudits{severity=\"High\"})"
+              expr   = "sum by (exported_namespace) (trivy_resource_configaudits{severity=\"High\",exported_namespace=~\".+\"})"
             },
 
             # ----- Factor 3: runtime detection activity (24h) -----
@@ -69,7 +76,7 @@ resource "kubectl_manifest" "security_recording_rules" {
             # much more useful. The `policy` label carries the policy name.
             {
               record = "namespace:runtime_detection_factor:tetragon_events_24h"
-              expr   = "sum by (exported_namespace) (increase(tetragon_policy_events_total{policy=~\"detect-.*\"}[24h]))"
+              expr   = "sum by (exported_namespace) (increase(tetragon_policy_events_total{policy=~\"detect-.*\",exported_namespace=~\".+\"}[24h]))"
             },
 
             # ----- Factor 4 (Hubble denied flows) deferred -----
