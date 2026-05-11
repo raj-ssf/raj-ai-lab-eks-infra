@@ -78,6 +78,36 @@ locals {
       hostnames        = ["vault.${var.domain}"]
       cert_secret_name = "vault-tls"
     }
+    # hello smoke-test app exposes two hostnames so the kustomize patch in
+    # argocd-apps.tf hello_app can replace both /spec/hostnames/0 and /1.
+    # The flatten in gateway_listener_specs makes one listener per hostname:
+    # `hello-https` and `hello2-https`, which match the apps repo's
+    # HTTPRoute parentRefs[*].sectionName.
+    hello = {
+      namespace        = "default"
+      hostnames        = ["hello.${var.domain}", "hello2.${var.domain}"]
+      cert_secret_name = "hello-tls"
+    }
+    rag = {
+      namespace        = "rag"
+      hostnames        = ["rag.${var.domain}"]
+      cert_secret_name = "rag-tls"
+    }
+    llm = {
+      namespace        = "llm"
+      hostnames        = ["llm.${var.domain}"]
+      cert_secret_name = "vllm-tls"
+    }
+    langgraph = {
+      namespace        = "langgraph"
+      hostnames        = ["langgraph.${var.domain}"]
+      cert_secret_name = "langgraph-service-tls"
+    }
+    chat = {
+      namespace        = "chat"
+      hostnames        = ["chat.${var.domain}"]
+      cert_secret_name = "chat-ui-tls"
+    }
   }
 
   gateway_listener_specs = flatten([

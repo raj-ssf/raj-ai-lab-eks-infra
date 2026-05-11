@@ -50,6 +50,77 @@ resource "aws_ecr_lifecycle_policy" "langgraph_service" {
   })
 }
 
+# -----------------------------------------------------------------------------
+# Per-service GHA OIDC role for pushing langgraph-service images to ECR.
+# In the old cluster this lived in gha-oidc.tf; new cluster keeps it inline
+# (mirrors chat-ui.tf / ingestion-service.tf shape).
+# -----------------------------------------------------------------------------
+
+resource "aws_iam_role" "gha_langgraph_service" {
+  name        = "${var.cluster_name}-gha-langgraph-service"
+  description = "Assumed by GHA build-push-langgraph-service workflow to push images to ECR"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect = "Allow"
+      Principal = {
+        Federated = data.aws_iam_openid_connect_provider.github.arn
+      }
+      Action = "sts:AssumeRoleWithWebIdentity"
+      Condition = {
+        StringEquals = {
+          "token.actions.githubusercontent.com:aud" = "sts.amazonaws.com"
+        }
+        StringLike = {
+          "token.actions.githubusercontent.com:sub" = "repo:${var.gha_repo_owner}/${var.gha_repo_name}:ref:refs/heads/main"
+        }
+      }
+    }]
+  })
+}
+
+resource "aws_iam_policy" "gha_langgraph_service_ecr" {
+  name        = "${var.cluster_name}-gha-langgraph-service-ecr"
+  description = "ECR push permissions for langgraph-service repo"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid      = "AuthToken"
+        Effect   = "Allow"
+        Action   = "ecr:GetAuthorizationToken"
+        Resource = "*"
+      },
+      {
+        Sid    = "PushToLanggraphServiceRepo"
+        Effect = "Allow"
+        Action = [
+          "ecr:BatchCheckLayerAvailability",
+          "ecr:BatchGetImage",
+          "ecr:CompleteLayerUpload",
+          "ecr:GetDownloadUrlForLayer",
+          "ecr:InitiateLayerUpload",
+          "ecr:PutImage",
+          "ecr:UploadLayerPart",
+        ]
+        Resource = aws_ecr_repository.langgraph_service.arn
+      },
+    ]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "gha_langgraph_service_ecr" {
+  role       = aws_iam_role.gha_langgraph_service.name
+  policy_arn = aws_iam_policy.gha_langgraph_service_ecr.arn
+}
+
+output "gha_langgraph_service_role_arn" {
+  value       = aws_iam_role.gha_langgraph_service.arn
+  description = "Set as the LANGGRAPH_AWS_ROLE_ARN repo variable in GitHub Actions"
+}
+
 output "langgraph_service_ecr_url" {
   value       = aws_ecr_repository.langgraph_service.repository_url
   description = "Use as the LANGGRAPH_ECR_REPOSITORY_URL GHA repo variable"
@@ -64,20 +135,9 @@ output "langgraph_service_ecr_url" {
 # created in this ns before ArgoCD even runs its first sync.
 # =============================================================================
 
-resource "kubernetes_namespace" "langgraph" {
-  metadata {
-    name = "langgraph"
-    labels = {
-      # The kubernetes_labels.istio_injection TF resource manages this
-      # label as the source of truth — but seeding it here means the
-      # first ArgoCD sync (which races with terraform's labels apply)
-      # doesn't briefly create unmeshed pods. ArgoCD's reconcile loop
-      # has been observed to strip labels not in source manifests; the
-      # for-each labels resource in istio.tf re-applies on every TF run.
-      "istio-injection" = "enabled"
-    }
-  }
-}
+# Namespace `langgraph` is declared in namespaces.tf (canonical, no
+# istio-injection label — Cilium WireGuard handles east-west mTLS in this
+# cluster, not Istio sidecars).
 
 # =============================================================================
 # Langfuse credentials Secret.
@@ -159,54 +219,10 @@ resource "keycloak_openid_client" "langgraph_service" {
   ]
 }
 
-# =============================================================================
-# Cross-namespace Istio AuthorizationPolicy: allow langgraph-service
-# to reach the vllm-* Deployments in the llm namespace.
-#
-# The cluster-wide deny-all (istio-zero-trust.tf) blocks all inter-pod
-# traffic by default. allow-rag-service-only on qdrant covers RAG; the
-# llm namespace's existing allows cover ingress-nginx → vllm. But
-# langgraph-service is a NEW source that needs to reach vllm directly
-# for inference calls (not via NGINX). This policy adds the langgraph
-# SA principal to the allow list for inbound to llm-namespace
-# workloads.
-#
-# Scope: ns-wide on llm (no selector), so any vllm-* variant the agent
-# routes to is reachable. Tighter selectors per-workload would force
-# updating this policy every time a new variant Deployment is added,
-# which is high-friction for low security gain.
-# =============================================================================
-
-resource "kubectl_manifest" "allow_langgraph_to_llm" {
-  yaml_body = yamlencode({
-    apiVersion = "security.istio.io/v1"
-    kind       = "AuthorizationPolicy"
-    metadata = {
-      name      = "allow-langgraph-service"
-      namespace = "llm"
-    }
-    spec = {
-      action = "ALLOW"
-      rules = [
-        {
-          from = [{
-            source = {
-              principals = [
-                "cluster.local/ns/langgraph/sa/langgraph-service",
-              ]
-            }
-          }]
-        },
-      ]
-    }
-  })
-
-  depends_on = [
-    helm_release.istiod,
-    kubectl_manifest.deny_all_mesh_wide,
-    kubernetes_namespace.langgraph,
-  ]
-}
+# Istio AuthorizationPolicy block (langgraph-service → llm) removed —
+# Cilium-era cluster has no sidecar mesh, so AuthZ has no enforcer in the
+# data path. L3/L4 equivalent will live in cilium-network-policies.tf when
+# the llm namespace's vllm Deployments come back.
 
 # =============================================================================
 # Kubernetes RBAC: langgraph-service SA can read + patch Deployment scale in llm.

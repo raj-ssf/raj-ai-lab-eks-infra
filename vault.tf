@@ -57,6 +57,16 @@ resource "helm_release" "vault" {
             config    = <<-EOT
               ui = true
 
+              # api_addr is what Vault advertises in standby-to-leader 302
+              # redirects. Setting it to the public HTTPS URL means redirects
+              # stay on HTTPS — Go's HTTP client refuses HTTPS→HTTP downgrades
+              # ("redirect would cause protocol downgrade"), which broke the
+              # terraform-provider-vault any time TF hit a standby pod via
+              # the gateway. The 'cluster_addr' below is for raft peer
+              # traffic (intra-cluster) — that stays on internal HTTP.
+              api_addr     = "https://vault.${var.domain}"
+              cluster_addr = "http://POD_IP:8201"
+
               listener "tcp" {
                 address         = "0.0.0.0:8200"
                 cluster_address = "0.0.0.0:8201"
@@ -104,6 +114,18 @@ resource "helm_release" "vault" {
           size         = "10Gi"
           storageClass = "gp3"
           accessMode   = "ReadWriteOnce"
+        }
+
+        # VAULT_API_ADDR override. The chart's default entrypoint sets
+        # VAULT_API_ADDR=http://<POD_IP>:8200 which Vault uses as its
+        # standby-to-leader 302 Location header — env var wins over the
+        # HCL api_addr directive. Forcing the public HTTPS URL means
+        # redirects stay on HTTPS, unblocking terraform-provider-vault
+        # which refuses HTTPS→HTTP downgrades ("redirect would cause
+        # protocol downgrade"). Cost: standby-to-leader hops now route
+        # through the NLB (~5-15ms latency); acceptable for the lab.
+        extraEnvironmentVars = {
+          VAULT_API_ADDR = "https://vault.${var.domain}"
         }
 
         resources = {

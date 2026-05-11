@@ -220,7 +220,33 @@ resource "helm_release" "cilium" {
           }
         }
         metrics = {
-          enabled = ["dns", "drop", "tcp", "flow", "icmp", "http"]
+          # 2026-05-10 v2: extended contexts from "workload-name" to
+          # "workload-name+namespace" — the `+` chains multiple context
+          # types into a single context option. Result: drop+flow metrics
+          # now carry source_workload + source_namespace + destination_workload
+          # + destination_namespace labels, enabling the StackRox-parity risk
+          # score's network anomaly factor to join with the other namespace-
+          # scoped factors. Pattern is "<metric>:opt1;opt2" where `;`
+          # separates options and `+` chains values within one option.
+          enabled = [
+            "dns",
+            # labelsContext is the proper Cilium syntax for emitting multiple
+            # dimensions on a single metric. The `+` chain syntax on
+            # destinationContext didn't take effect in the agent — confirmed
+            # via series labels (only `destination` appeared, no
+            # `destination_namespace`). labelsContext takes pre-combined
+            # dimension names like `source_namespace`, `destination_workload`.
+            # labelsContext takes only context DIMENSIONS (source_*, destination_*,
+            # traffic_direction). The metric's native labels (drop's `reason`,
+            # flow's `verdict`, etc.) are automatic — including them in
+            # labelsContext rejects the entire config with "invalid labelsContext
+            # value: reason" and zeros out all hubble metrics.
+            "drop:labelsContext=source_workload,source_namespace,destination_workload,destination_namespace",
+            "tcp",
+            "flow:labelsContext=source_workload,source_namespace,destination_workload,destination_namespace",
+            "icmp",
+            "http",
+          ]
         }
         tls = {
           # Cilium operator generates and rotates the certs automatically.

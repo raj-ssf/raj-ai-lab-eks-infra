@@ -30,3 +30,9 @@ resource "kubernetes_namespace" "ingestion" {
     name = "ingestion"
   }
 }
+
+resource "kubernetes_namespace" "llm" {
+  metadata {
+    name = "llm"
+  }
+}

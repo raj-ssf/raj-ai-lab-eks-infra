@@ -40,10 +40,18 @@ resource "helm_release" "trivy_operator" {
   namespace  = kubernetes_namespace.trivy_system.metadata[0].name
   repository = "https://aquasecurity.github.io/helm-charts/"
   chart      = "trivy-operator"
-  # Pin — 0.24.x line is current stable. Bump cadence: check
-  # https://github.com/aquasecurity/trivy-operator/releases for
-  # CRD schema changes before upgrading.
-  version = "0.24.1"
+  # 2026-05-10: bumped chart 0.24.1 → 0.32.1 (app 0.22.0 → 0.30.1) to fix
+  # vulnerability scan jobs failing with "unrecognized scan job condition:
+  # FailureTarget / SuccessCriteriaMet". Newer Kubernetes Job API added
+  # those condition types; trivy-operator 0.22.0 was unaware and the
+  # reconciler errored on every scan attempt. Result: zero
+  # vulnerabilityreports CRs ever produced, which left the
+  # namespace:vulnerability_factor:high_critical recording rule (StackRox
+  # parity gap #3) empty. Multiple intervening releases also include
+  # config audit + RBAC scan fixes worth picking up.
+  # Bump cadence: check https://github.com/aquasecurity/trivy-operator/releases
+  # for CRD schema changes before upgrading.
+  version = "0.32.1"
 
   values = [
     yamlencode({

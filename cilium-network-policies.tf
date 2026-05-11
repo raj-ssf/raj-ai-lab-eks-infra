@@ -510,15 +510,26 @@ resource "kubectl_manifest" "vault_cnp" {
         {
           fromEntities = ["kube-apiserver"]
         },
-        # Apps in other namespaces will need to reach Vault for KV reads.
-        # When apps come back (Phase 4e+), enumerate them here. Until then,
-        # allow ingress from the meshed app namespaces.
+        # Apps in other namespaces reach Vault for KV reads via the
+        # vault-agent-injector init container pattern (POST to
+        # /v1/auth/kubernetes/login then GET /v1/secret/data/<path>).
+        # 2026-05-10: added rag, langgraph, chat, ingestion, llm — these
+        # services consume Vault-injected secrets at pod startup.
         {
           fromEndpoints = [{
             matchExpressions = [{
               key      = "k8s:io.kubernetes.pod.namespace"
               operator = "In"
-              values   = ["argocd", "monitoring", "keycloak"]
+              values = [
+                "argocd",
+                "monitoring",
+                "keycloak",
+                "rag",
+                "langgraph",
+                "chat",
+                "ingestion",
+                "llm",
+              ]
             }]
           }]
         },
@@ -619,13 +630,25 @@ resource "kubectl_manifest" "keycloak_cnp" {
           }]
         },
         # OIDC clients in other namespaces talking to Keycloak's
-        # /token, /userinfo, /.well-known endpoints.
+        # /token, /userinfo, /.well-known endpoints. 2026-05-10: added
+        # langgraph, chat, ingestion, rag, llm — these fetch JWKS at
+        # startup for Bearer-token validation, and chat-ui drives the
+        # browser through Keycloak login.
         {
           fromEndpoints = [{
             matchExpressions = [{
               key      = "k8s:io.kubernetes.pod.namespace"
               operator = "In"
-              values   = ["argocd", "monitoring", "langfuse"]
+              values = [
+                "argocd",
+                "monitoring",
+                "langfuse",
+                "langgraph",
+                "chat",
+                "ingestion",
+                "rag",
+                "llm",
+              ]
             }]
           }]
         },
@@ -758,8 +781,15 @@ resource "kubectl_manifest" "monitoring_cnp" {
         # Common scrape ports across all namespaces. Prometheus
         # legitimately needs to reach pods in any namespace at
         # these ports.
+        #
+        # 2026-05-10: switched from `toEndpoints: matchLabels: {}` to
+        # `toEntities: ["cluster"]`. The empty-matchLabels idiom claims to
+        # match any pod but doesn't reliably match cross-namespace targets
+        # in Cilium 1.16 — silently drops with policy-verdict:none for
+        # legitimate pods. `cluster` entity is the unambiguous "anything
+        # in this cluster" selector.
         {
-          toEndpoints = [{ matchLabels = {} }] # any pod
+          toEntities = ["cluster"]
           toPorts = [{
             ports = [
               { port = "8080", protocol = "TCP" },  # kube-state-metrics
@@ -769,11 +799,23 @@ resource "kubectl_manifest" "monitoring_cnp" {
               { port = "9100", protocol = "TCP" },  # node-exporter
               { port = "9153", protocol = "TCP" },  # kube-dns metrics
               { port = "9402", protocol = "TCP" },  # cert-manager
-              { port = "8000", protocol = "TCP" },  # generic /metrics
+              { port = "8000", protocol = "TCP" },  # generic /metrics + kyverno-svc-metrics
               { port = "8001", protocol = "TCP" },  # generic
               { port = "8081", protocol = "TCP" },  # alt /metrics
               { port = "9402", protocol = "TCP" },  # alt
               { port = "10250", protocol = "TCP" }, # kubelet
+              # Security stack metrics (StackRox parity dashboard sources):
+              # NOTE: hostNetwork DaemonSets (tetragon, cilium-agent, hubble) are reached
+              # via NODE IPs which Cilium classifies as `host` entity, NOT as labeled
+              # pod endpoints. The host-targeted rule below covers those; this rule
+              # covers anything that's an actual labeled pod (trivy-operator, kyverno).
+              { port = "2112", protocol = "TCP" },  # tetragon agent (also via host rule)
+              { port = "2113", protocol = "TCP" },  # tetragon-operator
+              { port = "9962", protocol = "TCP" },  # cilium-agent prometheus (via host)
+              { port = "9963", protocol = "TCP" },  # cilium-operator prometheus
+              { port = "9964", protocol = "TCP" },  # cilium-envoy admin (via host)
+              { port = "9965", protocol = "TCP" },  # hubble metrics (via host)
+              { port = "80", protocol = "TCP" },    # trivy-operator /metrics
               { port = "15020", protocol = "TCP" }, # istio-merged metrics (no longer relevant)
             ]
           }]
@@ -788,6 +830,25 @@ resource "kubectl_manifest" "monitoring_cnp" {
           }]
           toPorts = [{
             ports = [{ port = "443", protocol = "TCP" }]
+          }]
+        },
+        # hostNetwork DaemonSet metrics endpoints. Tetragon, cilium-agent, hubble
+        # bind their /metrics to the NODE network — Prometheus scrapes them at
+        # the node IP, not pod IP. Cilium classifies these destinations as
+        # `host` (local node) OR `remote-node` (other nodes) — BOTH must be
+        # in the allowlist or cross-node scrapes get dropped. Hubble verdict
+        # before this fix: "<> 10.71.92.179:9965 (remote-node) EGRESS DENIED"
+        # because the rule only specified `host` (local-node-only).
+        {
+          toEntities = ["host", "remote-node"]
+          toPorts = [{
+            ports = [
+              { port = "2112", protocol = "TCP" },  # tetragon agent
+              { port = "9962", protocol = "TCP" },  # cilium-agent
+              { port = "9964", protocol = "TCP" },  # cilium-envoy
+              { port = "9965", protocol = "TCP" },  # hubble metrics
+              { port = "10250", protocol = "TCP" }, # kubelet
+            ]
           }]
         },
       ]
