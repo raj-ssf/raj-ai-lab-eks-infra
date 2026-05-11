@@ -281,14 +281,18 @@ locals {
         }
       },
 
-      # ============ Row 5a — Top workloads receiving denied traffic ============
+      # ============ Row 4b — Risk-ranked WORKLOADS (StackRox-style drilldown) ============
+      #
+      # The workload-level twin of the namespace risk score. When the namespace
+      # panel points at a busy namespace, this answers "which specific
+      # Deployment in that namespace is the contributor."
       {
-        id    = 10
-        title = "Top 15 workloads receiving denied network traffic (1h)"
+        id    = 11
+        title = "Risk-ranked workloads (top 25 — vuln × priv × runtime × network)"
         type  = "table"
-        gridPos = { h = 8, w = 12, x = 0, y = 34 }
+        gridPos = { h = 10, w = 24, x = 0, y = 34 }
         targets = [{
-          expr    = "topk(15, sum by (destination, reason) (increase(hubble_drop_total[1h])))"
+          expr    = "topk(25, workload:risk_score:total)"
           refId   = "A"
           format  = "table"
           instant = true
@@ -298,9 +302,54 @@ locals {
           options = {
             excludeByName = { Time = true, __name__ = true }
             renameByName = {
-              Value       = "Denied flows (1h)"
-              destination = "Destination workload"
-              reason      = "Reason"
+              Value             = "Risk score"
+              exported_namespace = "Namespace"
+              workload          = "Workload"
+            }
+          }
+        }]
+        fieldConfig = {
+          defaults = {
+            color = { mode = "thresholds" }
+            thresholds = {
+              mode  = "absolute"
+              steps = [
+                { color = "green",  value = null },
+                { color = "yellow", value = 5 },
+                { color = "orange", value = 25 },
+                { color = "red",    value = 100 },
+              ]
+            }
+            custom = { cellOptions = { type = "color-background" } }
+          }
+        }
+      },
+
+      # ============ Row 5a — Top workloads receiving denied traffic ============
+      {
+        id    = 10
+        title = "Top 15 workloads receiving denied network traffic (1h)"
+        type  = "table"
+        gridPos = { h = 8, w = 12, x = 0, y = 44 }
+        targets = [{
+          # 2026-05-10 v2: switched from `destination` to
+          # `destination_namespace + destination_workload` after Cilium
+          # labelsContext was reconfigured. Gives (ns, workload) context
+          # so triage can jump directly to the right kubectl namespace.
+          expr    = "topk(15, sum by (destination_namespace, destination_workload, reason) (increase(hubble_drop_total{destination_workload!=\"\"}[1h])))"
+          refId   = "A"
+          format  = "table"
+          instant = true
+        }]
+        transformations = [{
+          id      = "organize"
+          options = {
+            excludeByName = { Time = true, __name__ = true }
+            renameByName = {
+              Value                 = "Denied flows (1h)"
+              destination_namespace = "Namespace"
+              destination_workload  = "Workload"
+              reason                = "Reason"
             }
           }
         }]
@@ -311,7 +360,7 @@ locals {
         id    = 8
         title = "Top 10 most-vulnerable images (HIGH+CRITICAL)"
         type  = "table"
-        gridPos = { h = 8, w = 12, x = 12, y = 34 }
+        gridPos = { h = 8, w = 12, x = 12, y = 44 }
         targets = [{
           expr    = "topk(10, sum by (image_repository, image_tag) (trivy_image_vulnerabilities{severity=~\"High|Critical\"}))"
           refId   = "A"
