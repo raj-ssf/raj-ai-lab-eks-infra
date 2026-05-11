@@ -233,12 +233,60 @@ locals {
         }
       },
 
-      # ============ Row 4 — Top vulnerable images ============
+      # ============ Row 4 — Risk-correlated top workloads (StackRox-style) ============
+      #
+      # This is the "killer panel" — the workload:risk_score:total recording
+      # rule fuses vulnerability × privilege × runtime × network signals into
+      # a single per-workload number. Sorting descending gives the operator
+      # the same prioritization StackRox does.
+      {
+        id    = 9
+        title = "Risk-ranked namespaces (composite score: vuln + priv + runtime)"
+        type  = "table"
+        gridPos = { h = 10, w = 24, x = 0, y = 24 }
+        targets = [{
+          expr    = "topk(20, namespace:risk_score:total)"
+          refId   = "A"
+          format  = "table"
+          instant = true
+        }]
+        transformations = [{
+          id      = "organize"
+          options = {
+            excludeByName = { Time = true, __name__ = true }
+            renameByName = {
+              Value     = "Risk score"
+              namespace = "Namespace"
+            }
+          }
+        }]
+        fieldConfig = {
+          defaults = {
+            color = { mode = "thresholds" }
+            thresholds = {
+              mode  = "absolute"
+              steps = [
+                { color = "green", value = null },
+                { color = "yellow", value = 5 },
+                { color = "orange", value = 25 },
+                { color = "red", value = 100 },
+              ]
+            }
+            custom = { cellOptions = { type = "color-background" } }
+          }
+          overrides = [{
+            matcher    = { id = "byName", options = "Risk score" }
+            properties = [{ id = "custom.width", value = 120 }]
+          }]
+        }
+      },
+
+      # ============ Row 5 — Top vulnerable images ============
       {
         id    = 8
         title = "Top 10 most-vulnerable images (HIGH+CRITICAL)"
         type  = "table"
-        gridPos = { h = 8, w = 24, x = 0, y = 24 }
+        gridPos = { h = 8, w = 24, x = 0, y = 34 }
         targets = [{
           expr    = "topk(10, sum by (image_repository, image_tag) (trivy_image_vulnerabilities{severity=~\"High|Critical\"}))"
           refId   = "A"
