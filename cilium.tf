@@ -220,7 +220,19 @@ resource "helm_release" "cilium" {
           }
         }
         metrics = {
-          enabled = ["dns", "drop", "tcp", "flow", "icmp", "http"]
+          # 2026-05-10: added destinationContext/sourceContext=workload-name
+          # on drop + flow so the metrics carry source/destination workload
+          # labels — needed for the StackRox-parity risk score's network
+          # anomaly factor (Hubble's default drop emits only protocol+reason,
+          # no workload attribution). Pattern is "<metric>:option1;option2".
+          enabled = [
+            "dns",
+            "drop:destinationContext=workload-name;sourceContext=workload-name",
+            "tcp",
+            "flow:destinationContext=workload-name;sourceContext=workload-name",
+            "icmp",
+            "http",
+          ]
         }
         tls = {
           # Cilium operator generates and rotates the certs automatically.

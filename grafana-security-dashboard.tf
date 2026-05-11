@@ -281,12 +281,37 @@ locals {
         }
       },
 
-      # ============ Row 5 — Top vulnerable images ============
+      # ============ Row 5a — Top workloads receiving denied traffic ============
+      {
+        id    = 10
+        title = "Top 15 workloads receiving denied network traffic (1h)"
+        type  = "table"
+        gridPos = { h = 8, w = 12, x = 0, y = 34 }
+        targets = [{
+          expr    = "topk(15, sum by (destination, reason) (increase(hubble_drop_total[1h])))"
+          refId   = "A"
+          format  = "table"
+          instant = true
+        }]
+        transformations = [{
+          id      = "organize"
+          options = {
+            excludeByName = { Time = true, __name__ = true }
+            renameByName = {
+              Value       = "Denied flows (1h)"
+              destination = "Destination workload"
+              reason      = "Reason"
+            }
+          }
+        }]
+      },
+
+      # ============ Row 5b — Top vulnerable images ============
       {
         id    = 8
         title = "Top 10 most-vulnerable images (HIGH+CRITICAL)"
         type  = "table"
-        gridPos = { h = 8, w = 24, x = 0, y = 34 }
+        gridPos = { h = 8, w = 12, x = 12, y = 34 }
         targets = [{
           expr    = "topk(10, sum by (image_repository, image_tag) (trivy_image_vulnerabilities{severity=~\"High|Critical\"}))"
           refId   = "A"
