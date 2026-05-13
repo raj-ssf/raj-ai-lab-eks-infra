@@ -1,0 +1,42 @@
+{{- with .Values.policies.requireTracingLabels }}
+{{- if .enabled }}
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-tracing-labels
+  annotations:
+    policies.kyverno.io/title: Inference workloads must carry tracing labels
+    policies.kyverno.io/category: AI Platform
+    policies.kyverno.io/severity: medium
+    policies.kyverno.io/description: >-
+      Deployments, StatefulSets, and Rollouts in inference-tier
+      namespaces (llm, rag-service, langgraph-service, ingestion-service,
+      chat-ui) must declare the labels that Langfuse uses to join
+      trace span context. Prevents untraceable inference, which would
+      be a HIPAA-equivalent audit gap.
+spec:
+  validationFailureAction: {{ include "policies.action" .action }}
+  background: true
+  rules:
+    - name: inference-workloads-need-tracing-labels
+      match:
+        any:
+          - resources:
+              kinds: [Deployment, StatefulSet, Rollout]
+              namespaces:
+                {{- range .namespaces }}
+                - {{ . }}
+                {{- end }}
+      validate:
+        message: >-
+          Deployments/StatefulSets/Rollouts in inference namespaces must
+          declare the tracing labels: {{ .requiredLabels | toJson }}.
+          Without these, Langfuse can't attribute spans to this workload.
+        pattern:
+          spec:
+            template:
+              metadata:
+                labels:
+                  {{- toYaml .requiredLabels | nindent 18 }}
+{{- end }}
+{{- end }}

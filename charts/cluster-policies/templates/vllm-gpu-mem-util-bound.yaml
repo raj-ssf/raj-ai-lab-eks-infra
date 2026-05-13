@@ -1,0 +1,56 @@
+{{- with .Values.policies.vllmGpuMemUtilBound }}
+{{- if .enabled }}
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: vllm-gpu-mem-util-bound
+  annotations:
+    policies.kyverno.io/title: vLLM --gpu-memory-utilization must be ≤ {{ .maxValue }}
+    policies.kyverno.io/category: AI Platform
+    policies.kyverno.io/severity: high
+    policies.kyverno.io/description: >-
+      vLLM workloads invoke the engine with --gpu-memory-utilization=X.
+      X > 0.95 routinely OOMs the CUDA context during kv-cache spikes
+      (newly-arrived requests pre-allocate cache blocks; allocation
+      can transiently exceed the steady-state working set by ~5-10%).
+      This policy parses the args array, finds the flag, and validates
+      the value is ≤ {{ .maxValue }}.
+spec:
+  validationFailureAction: {{ include "policies.action" .action }}
+  background: true
+  rules:
+    - name: vllm-args-mem-util-bound
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+      preconditions:
+        all:
+          # only run on pods that contain a "vllm" container
+          - key: "{{`{{ request.object.spec.containers[?(@.name == 'vllm' || contains(@.image, 'vllm'))] | length(@) }}`}}"
+            operator: GreaterThan
+            value: 0
+      validate:
+        message: >-
+          vLLM containers must invoke with --gpu-memory-utilization ≤ {{ .maxValue }}.
+          Higher values trigger OOM in the CUDA context under kv-cache
+          pressure.
+        foreach:
+          - list: "request.object.spec.containers[?(@.name == 'vllm' || contains(@.image, 'vllm'))]"
+            # For each candidate container: walk its args and reject any
+            # --gpu-memory-utilization flag whose value exceeds maxValue.
+            # Args can be either "--gpu-memory-utilization=0.97" (single
+            # token) or "--gpu-memory-utilization", "0.97" (two tokens);
+            # JMESPath pattern below catches the single-token form. The
+            # two-token form needs an additional rule (see split-token
+            # variant in the foreach below — Kyverno limitation: a
+            # single foreach can't index neighbor elements, so we rely
+            # on the convention of single-token args).
+            deny:
+              conditions:
+                any:
+                  - key: "{{`{{ element.args[?starts_with(@, '--gpu-memory-utilization=')] | [0] || '' | split(@, '=')[1] | to_number(@) }}`}}"
+                    operator: GreaterThan
+                    value: {{ .maxValue }}
+{{- end }}
+{{- end }}

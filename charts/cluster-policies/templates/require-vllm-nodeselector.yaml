@@ -1,0 +1,36 @@
+{{- with .Values.policies.requireVllmNodeSelector }}
+{{- if .enabled }}
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-vllm-nodeselector
+  annotations:
+    policies.kyverno.io/title: vLLM workloads must select GPU nodes
+    policies.kyverno.io/category: AI Platform
+    policies.kyverno.io/severity: high
+    policies.kyverno.io/description: >-
+      Pods whose name matches {{ .workloadNamePattern }} must declare
+      nodeSelector.nvidia\.com/gpu\.present="true". Without it, the
+      scheduler may place the pod on a CPU-only node where vLLM's CUDA
+      init fails with an unhelpful error (`No CUDA devices available`).
+      This policy catches the misconfig at admission instead of after
+      a 60-90s Karpenter spin-up + crash.
+spec:
+  validationFailureAction: {{ include "policies.action" .action }}
+  background: true
+  rules:
+    - name: vllm-needs-gpu-nodeselector
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              names: ["{{ .workloadNamePattern }}"]
+      validate:
+        message: >-
+          vLLM pods must declare nodeSelector "nvidia.com/gpu.present: \"true\"".
+        pattern:
+          spec:
+            nodeSelector:
+              nvidia.com/gpu.present: "true"
+{{- end }}
+{{- end }}

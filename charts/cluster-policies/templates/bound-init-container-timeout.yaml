@@ -1,0 +1,40 @@
+{{- with .Values.policies.boundInitContainerTimeout }}
+{{- if .enabled }}
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: bound-init-container-timeout
+  annotations:
+    policies.kyverno.io/title: Init containers must have bounded timeout
+    policies.kyverno.io/category: AI Platform
+    policies.kyverno.io/severity: medium
+    policies.kyverno.io/description: >-
+      Pods with init containers must set spec.activeDeadlineSeconds.
+      Critical for LLM workloads where init containers stream
+      multi-GB model weights from S3 — a stalled sync (IAM mis-bound,
+      throttle, network partition) otherwise holds a freshly-provisioned
+      GPU node indefinitely while paying ~$3/hr.
+spec:
+  validationFailureAction: {{ include "policies.action" .action }}
+  background: true
+  rules:
+    - name: pods-with-init-must-set-deadline
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+      preconditions:
+        all:
+          - key: {{ "{{ length(request.object.spec.initContainers) }}" | quote }}
+            operator: GreaterThan
+            value: 0
+      validate:
+        message: >-
+          Pods with initContainers must set spec.activeDeadlineSeconds
+          (≤ {{ .maxSeconds }}). This bounds how long a stuck model-sync
+          can hold a GPU node hostage.
+        pattern:
+          spec:
+            activeDeadlineSeconds: "<={{ .maxSeconds }}"
+{{- end }}
+{{- end }}

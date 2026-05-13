@@ -1,0 +1,50 @@
+{{- with .Values.policies.requireGpuLimits }}
+{{- if .enabled }}
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-gpu-limits
+  annotations:
+    policies.kyverno.io/title: GPU limits required on GPU-scheduled pods
+    policies.kyverno.io/category: AI Platform
+    policies.kyverno.io/severity: high
+    policies.kyverno.io/description: >-
+      Workloads scheduled to GPU nodes (via toleration on
+      nvidia.com/gpu:NoSchedule) MUST declare nvidia.com/gpu in BOTH
+      requests AND limits on at least one container. Prevents a pod
+      from tolerating onto a GPU node and silently consuming the GPU
+      without proper accounting, which blocks consolidation and can
+      starve other tenants.
+spec:
+  validationFailureAction: {{ include "policies.action" .action }}
+  background: true
+  rules:
+    - name: gpu-pod-requires-nvidia-resource
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+      preconditions:
+        all:
+          - key: "{{`{{ request.object.spec.tolerations[?(@.key == 'nvidia.com/gpu')] | length(@) }}`}}"
+            operator: GreaterThan
+            value: 0
+      validate:
+        message: >-
+          Pods that tolerate nvidia.com/gpu must declare nvidia.com/gpu
+          in resources.requests AND resources.limits on at least one
+          container. Found a pod with the GPU toleration but no GPU
+          resource declared.
+        foreach:
+          - list: request.object.spec.containers
+            deny:
+              conditions:
+                all:
+                  - key: "{{`{{ element.resources.limits.\"nvidia.com/gpu\" || '' }}`}}"
+                    operator: Equals
+                    value: ""
+                  - key: "{{`{{ element.resources.requests.\"nvidia.com/gpu\" || '' }}`}}"
+                    operator: Equals
+                    value: ""
+{{- end }}
+{{- end }}

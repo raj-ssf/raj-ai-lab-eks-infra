@@ -1,0 +1,48 @@
+# Example terraform usage — replaces the existing kyverno-policies-*.tf
+# files. Drop this into the infra repo root as cluster-policies.tf when
+# you migrate.
+#
+# Per-environment value overrides live in values-<env>.yaml at the repo
+# root (gitignored if they contain anything env-specific you don't want
+# committed; otherwise commit them).
+
+resource "helm_release" "cluster_policies" {
+  name      = "cluster-policies"
+  chart     = "${path.module}/charts/cluster-policies"
+  namespace = "kyverno"
+
+  # Pin the chart version; bump intentionally per policy change.
+  # Chart.yaml -> version. Acts as the audit-trail handle.
+  version = "0.1.0"
+
+  values = [
+    yamlencode({
+      policies = {
+        # Stricter in prod-like environments, lenient in dev.
+        requirePodResources       = { action = var.policy_enforce_mode }
+        allowedImageRegistries    = { action = var.policy_enforce_mode }
+        requireGpuLimits          = { action = var.policy_enforce_mode }
+        boundInitContainerTimeout = { action = "audit" }
+        requireTracingLabels      = { action = "audit" }
+        vllmGpuMemUtilBound       = { action = var.policy_enforce_mode }
+        requireVllmNodeSelector   = { action = var.policy_enforce_mode }
+      }
+    })
+  ]
+
+  depends_on = [
+    helm_release.kyverno,
+  ]
+}
+
+# Set to "audit" in dev, "enforce" in tst/ext/prd. Promote a policy from
+# audit to enforce after observing PolicyReport CRs for 1-2 weeks.
+variable "policy_enforce_mode" {
+  description = "Default action for policies: 'audit' (warn) or 'enforce' (block)"
+  type        = string
+  default     = "audit"
+  validation {
+    condition     = contains(["audit", "enforce"], var.policy_enforce_mode)
+    error_message = "policy_enforce_mode must be 'audit' or 'enforce'."
+  }
+}

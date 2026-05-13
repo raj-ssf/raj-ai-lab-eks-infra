@@ -1,0 +1,79 @@
+{{- with .Values.policies.allowedImageRegistries }}
+{{- if .enabled }}
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: allowed-image-registries
+  annotations:
+    policies.kyverno.io/title: Container images must be from approved registries
+    policies.kyverno.io/category: Supply Chain
+    policies.kyverno.io/severity: high
+    policies.kyverno.io/description: >-
+      Container images must be pulled from approved registries (typically
+      account ECR + vetted public mirrors). Stops DockerHub-rate-limit
+      surprises in production AND closes a supply-chain hole (an attacker
+      with cluster RBAC could otherwise deploy from any public registry).
+spec:
+  validationFailureAction: {{ include "policies.action" .action }}
+  background: true
+  rules:
+    - name: image-from-allowed-registry
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                {{- include "policies.excludeNamespaces" (list $ (.excludeNamespaces | default list)) | nindent 16 }}
+      validate:
+        message: >-
+          Container image must come from one of:
+          {{- range .registries }} {{ . }}{{- end }}
+        foreach:
+          - list: request.object.spec.containers
+            deny:
+              conditions:
+                all:
+                  - key: {{ "{{ element.image }}" | quote }}
+                    operator: NotIn
+                    value:
+                      {{- range .registries }}
+                      - {{ . | quote }}
+                      {{- end }}
+        # NOTE: initContainers checked via a separate rule (Kyverno doesn't
+        # currently support multiple foreach.list in one validate block when
+        # one of the lists might be empty/absent).
+    - name: init-image-from-allowed-registry
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                {{- include "policies.excludeNamespaces" (list $ (.excludeNamespaces | default list)) | nindent 16 }}
+      preconditions:
+        all:
+          - key: {{ "{{ length(request.object.spec.initContainers) }}" | quote }}
+            operator: GreaterThan
+            value: 0
+      validate:
+        message: >-
+          Init container image must come from one of:
+          {{- range .registries }} {{ . }}{{- end }}
+        foreach:
+          - list: request.object.spec.initContainers
+            deny:
+              conditions:
+                all:
+                  - key: {{ "{{ element.image }}" | quote }}
+                    operator: NotIn
+                    value:
+                      {{- range .registries }}
+                      - {{ . | quote }}
+                      {{- end }}
+{{- end }}
+{{- end }}

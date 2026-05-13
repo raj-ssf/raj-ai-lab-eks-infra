@@ -1,0 +1,15 @@
+apiVersion: v2
+name: cluster-policies
+description: Kyverno ClusterPolicies for the AI-lab platform. Bundles general
+  pod-security policies (resource limits, image registry allowlist) and
+  LLM-platform-specific policies (GPU limits required, init-container time
+  bound, tracing labels required, vLLM gpu-memory-utilization bound).
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - kyverno
+  - policy
+  - security
+  - llm
+home: https://github.com/raj-ssf/raj-ai-lab-eks-infra
