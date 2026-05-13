@@ -1,0 +1,48 @@
+{{- with .Values.policies.requirePodResources }}
+{{- if .enabled }}
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-pod-resources
+  annotations:
+    policies.kyverno.io/title: Pods must declare cpu+memory requests and limits
+    policies.kyverno.io/category: Best Practices
+    policies.kyverno.io/severity: medium
+    policies.kyverno.io/description: >-
+      Every container must declare resources.requests AND resources.limits
+      for both cpu and memory. Without limits, a container can consume
+      arbitrary node resources and starve neighbors; without requests,
+      the scheduler can't make informed placement decisions.
+spec:
+  validationFailureAction: {{ include "policies.action" .action }}
+  background: true
+  rules:
+    - name: container-resources-required
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+      exclude:
+        any:
+          - resources:
+              namespaces:
+                {{- include "policies.excludeNamespaces" (list $ (.excludeNamespaces | default list)) | nindent 16 }}
+      validate:
+        message: >-
+          Every container in this Pod must declare resources.requests
+          and resources.limits for both cpu and memory.
+        pattern:
+          spec:
+            containers:
+              - resources:
+                  requests:
+                    cpu: "?*"
+                    memory: "?*"
+                  limits:
+                    memory: "?*"
+                    # NOTE: deliberately omitting limits.cpu — many K8s shops
+                    # set requests.cpu only (no cpu limit) to avoid throttle
+                    # surprises. If you want to enforce cpu limit too, add
+                    # `cpu: "?*"` here.
+{{- end }}
+{{- end }}

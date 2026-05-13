@@ -1,0 +1,96 @@
+# Global defaults for the policy bundle.
+#
+# Two axes per policy:
+#   enabled  — whether to render the ClusterPolicy at all
+#   action   — "audit" (warn, don't block) or "enforce" (block at admission)
+#
+# Promotion path: enabled=true,action=audit → observe in policy reports
+# (PolicyReport CRs) for 1-2 weeks → flip to action=enforce in next
+# environment promotion. Roll forward dev → tst → ext → prd via
+# ArgoCD ApplicationSet with per-cluster valueFiles.
+#
+# Excludes: every policy excludes kube-system + the kyverno namespace by
+# default; per-policy excludes layer on top (set via .exclude).
+
+global:
+  # Namespaces excluded from EVERY policy. System+infra-tier namespaces
+  # that should never be policy-evaluated.
+  defaultExcludeNamespaces:
+    - kube-system
+    - kube-public
+    - kube-node-lease
+    - kyverno
+    - cilium
+    - karpenter
+
+policies:
+
+  # ---------------------------------------------------------------------------
+  # GENERAL pod-security policies
+  # ---------------------------------------------------------------------------
+
+  # Every Pod must declare both requests AND limits for cpu+memory.
+  # Caveat: GPU pods are EXEMPT on cpu/memory requests (see
+  # vllmExemptions below) because Karpenter sizes the node from the
+  # GPU limit; the cpu/memory bound is best-effort.
+  requirePodResources:
+    enabled: true
+    action: audit
+    excludeNamespaces: []   # in addition to global
+
+  # Container images must come from approved registries.
+  # Default: only AWS ECR for this account.
+  allowedImageRegistries:
+    enabled: true
+    action: audit
+    registries:
+      - "050693401425.dkr.ecr.us-west-2.amazonaws.com/*"
+      - "public.ecr.aws/*"
+      - "quay.io/cilium/*"
+      - "ghcr.io/aquasecurity/*"
+      - "vllm/vllm-openai*"     # vendor; consider mirror-to-ECR later
+
+  # ---------------------------------------------------------------------------
+  # LLM-PLATFORM-SPECIFIC policies
+  # ---------------------------------------------------------------------------
+
+  # Workloads scheduled to GPU nodes (toleration nvidia.com/gpu) MUST
+  # declare nvidia.com/gpu in both requests AND limits. Prevents the
+  # "runaway pod claims all GPUs" footgun.
+  requireGpuLimits:
+    enabled: true
+    action: audit
+
+  # Init containers must have activeDeadlineSeconds set. Catches stuck
+  # model-sync init containers (S3 download stalls, IAM mis-bound, etc.)
+  # before they hold a GPU node hostage indefinitely.
+  boundInitContainerTimeout:
+    enabled: true
+    action: audit
+    maxSeconds: 1800   # 30 min — covers worst-case 405B model sync
+
+  # Deployments/StatefulSets in inference namespaces must carry tracing
+  # labels so Langfuse can join trace span context. Prevents
+  # untraceable inference (cost-attribution & audit invariant).
+  requireTracingLabels:
+    enabled: true
+    action: audit
+    namespaces: [llm, rag-service, langgraph-service, ingestion-service, chat-ui]
+    requiredLabels:
+      tracing.myriad/langfuse: "enabled"
+
+  # vLLM args cannot exceed --gpu-memory-utilization=0.95. Leaves
+  # headroom for kv-cache spikes; values >0.95 routinely OOM the
+  # CUDA context.
+  vllmGpuMemUtilBound:
+    enabled: true
+    action: audit
+    maxValue: "0.95"
+
+  # vLLM workloads must declare nvidia.com/gpu.present nodeSelector.
+  # Stops accidental CPU-only scheduling that would silently fail at
+  # CUDA init.
+  requireVllmNodeSelector:
+    enabled: true
+    action: audit
+    workloadNamePattern: "vllm*"
