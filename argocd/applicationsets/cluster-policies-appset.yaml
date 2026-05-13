@@ -1,0 +1,105 @@
+# ApplicationSet for the cluster-policies chart.
+#
+# Pattern: ONE ApplicationSet object creates ONE Argo Application per
+# matching cluster (the `clusters` generator). Each Application points at
+# the same chart but loads cluster-specific valueFiles, so dev runs in
+# audit mode and prd in enforce mode without code duplication.
+#
+# Why ApplicationSet instead of N hand-maintained Applications:
+#   - When you add a new cluster, the matching label in the generator
+#     auto-creates the Application. No PR per cluster.
+#   - Single source of truth for promotion rules (one valueFile per env).
+#   - `goTemplate: true` enables Go template syntax in the template body,
+#     which is cleaner than the legacy ${VAR} substitution.
+#
+# Why the matchLabels filter:
+#   - We don't want to deploy this to in-cluster (the local Argo cluster
+#     hosts Argo itself — it gets the policies via a separate Application
+#     in argocd-apps.tf, not via this AppSet).
+#   - The `policy-tier=enabled` label is the opt-in switch. Each cluster's
+#     Argo Secret (the cluster registration) must carry that label for
+#     this AppSet to target it.
+
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: cluster-policies
+  namespace: argocd
+spec:
+  # When the chart upgrades, propagate immediately to all matching
+  # clusters. If you want staged rollouts, change to PreserveResourcesOnDeletion
+  # and gate via syncWaves + per-Application sync windows.
+  goTemplate: true
+  goTemplateOptions: ["missingkey=error"]
+
+  generators:
+    - clusters:
+        selector:
+          matchLabels:
+            policy-tier: enabled
+        # Each matched cluster injects: .name, .server, .metadata.labels,
+        # .metadata.annotations into the template scope.
+
+  template:
+    metadata:
+      name: 'cluster-policies-{{ "{{ .name }}" }}'
+      labels:
+        managed-by: applicationset
+        appset: cluster-policies
+    spec:
+      project: platform
+
+      source:
+        # Chart sourced from this same infra repo. Argo's helm support
+        # renders against valueFiles relative to the repo root.
+        repoURL: 'git@github.com:raj-ssf/raj-ai-lab-eks-infra.git'
+        targetRevision: main
+        path: charts/cluster-policies
+        helm:
+          # Per-cluster value overrides. Files live in
+          # charts/cluster-policies/values/values-<clusterName>.yaml
+          # within this repo. Falls through to values.yaml defaults for
+          # any key the override doesn't set.
+          valueFiles:
+            - 'values/values-{{ "{{ .name }}" }}.yaml'
+          # Optional: pass cluster name + tier as Helm values so policy
+          # bodies can reference {{ .Values.global.clusterName }} if needed.
+          parameters:
+            - name: global.clusterName
+              value: '{{ "{{ .name }}" }}'
+            - name: global.policyTier
+              value: '{{ "{{ index .metadata.labels \"policy-tier-mode\" | default \"audit\" }}" }}'
+
+      destination:
+        server: '{{ "{{ .server }}" }}'
+        namespace: kyverno
+
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+          allowEmpty: false
+        syncOptions:
+          # Resources we create get the Kyverno controller's reconciliation.
+          - CreateNamespace=false        # kyverno ns is created by the kyverno chart itself
+          - ServerSideApply=true         # avoids the last-applied-configuration size limit on big PolicyReports
+          - RespectIgnoreDifferences=true
+        retry:
+          limit: 5
+          backoff:
+            duration: 5s
+            factor: 2
+            maxDuration: 3m
+
+      # If a cluster goes off the list (label flipped to disabled), keep
+      # the policies in place rather than ripping them out — operator
+      # would have to explicitly delete the Application.
+      ignoreApplicationDifferences:
+        - jsonPointers:
+            - /spec/source/targetRevision
+
+  # When an Application is removed from the set (cluster deregistered),
+  # delete its resources from that cluster. Switch to false if you want
+  # the policies to persist after deregistration.
+  syncPolicy:
+    preserveResourcesOnDeletion: false

@@ -72,9 +72,15 @@ policies:
   # Deployments/StatefulSets in inference namespaces must carry tracing
   # labels so Langfuse can join trace span context. Prevents
   # untraceable inference (cost-attribution & audit invariant).
+  #
+  # `mutateEnabled`: when true, auto-injects the labels via a companion
+  # Kyverno mutate rule, so developers don't have to set them manually.
+  # The validate rule remains as a backstop. See
+  # templates/mutate-tracing-labels.yaml.
   requireTracingLabels:
     enabled: true
     action: audit
+    mutateEnabled: true
     namespaces: [llm, rag-service, langgraph-service, ingestion-service, chat-ui]
     requiredLabels:
       tracing.myriad/langfuse: "enabled"
