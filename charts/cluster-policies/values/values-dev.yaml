@@ -1,0 +1,15 @@
+# Per-cluster overrides for the dev cluster.
+# Layered on top of charts/cluster-policies/values.yaml — only override
+# what differs. Everything not listed inherits the chart default.
+#
+# Dev policy: everything in audit, observe in PolicyReport CRs for 1-2
+# weeks before promoting to tst.
+
+policies:
+  requirePodResources:       { action: audit }
+  allowedImageRegistries:    { action: audit }
+  requireGpuLimits:          { action: audit }
+  boundInitContainerTimeout: { action: audit }
+  requireTracingLabels:      { action: audit }
+  vllmGpuMemUtilBound:       { action: audit }
+  requireVllmNodeSelector:   { action: audit }

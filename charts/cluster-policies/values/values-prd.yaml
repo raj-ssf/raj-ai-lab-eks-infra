@@ -1,0 +1,15 @@
+# Per-cluster overrides for the prd cluster.
+# Layered on top of charts/cluster-policies/values.yaml.
+#
+# Prd policy: baseline + the high-confidence LLM policies are blocking.
+# requireTracingLabels stays audit until we backfill the labels on
+# existing Deployments (one-time migration).
+
+policies:
+  requirePodResources:       { action: enforce }
+  allowedImageRegistries:    { action: enforce }
+  requireGpuLimits:          { action: enforce }
+  boundInitContainerTimeout: { action: enforce }
+  requireTracingLabels:      { action: audit }     # promote after backfill
+  vllmGpuMemUtilBound:       { action: enforce }
+  requireVllmNodeSelector:   { action: enforce }

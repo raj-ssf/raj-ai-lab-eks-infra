@@ -1,0 +1,74 @@
+{{- with .Values.policies.requireTracingLabels }}
+{{- if and .enabled .mutateEnabled }}
+# =============================================================================
+# Mutate companion to require-tracing-labels (validate).
+#
+# When mutateEnabled=true, Kyverno auto-INJECTS the tracing labels onto any
+# Deployment/StatefulSet/Rollout in the inference namespaces that's missing
+# them. The validate rule still runs as a backstop — if mutation fails
+# (e.g., a syntactically malformed manifest), validation catches it.
+#
+# Why a mutate variant exists at all:
+# - validate-only forces every developer to remember to add the label.
+#   Realistic outcome: people forget, deployments get rejected at PR
+#   merge time, friction.
+# - mutate-only invisibly modifies user resources, which is its own
+#   ergonomics tax (developer sees a label they didn't write).
+# - mutate + validate is the goldilocks: the platform auto-applies the
+#   correct labels, AND there's a fail-safe if mutation is somehow
+#   skipped (e.g., a Kyverno bug, or a CR that doesn't match the mutate
+#   precondition but does match validate).
+#
+# Order of operations in Kyverno admission:
+#   1. Mutate rules run first, modifying the incoming resource.
+#   2. Validate rules run against the mutated form.
+# So a missing-label deployment becomes a labelled deployment becomes
+# a passing-validate deployment. Net: zero developer friction, zero
+# audit gap.
+# =============================================================================
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: mutate-tracing-labels
+  annotations:
+    policies.kyverno.io/title: Auto-inject Langfuse tracing labels on inference workloads
+    policies.kyverno.io/category: AI Platform
+    policies.kyverno.io/severity: low
+    policies.kyverno.io/description: >-
+      Mutating companion to require-tracing-labels. Auto-injects the
+      tracing labels on Deployments/StatefulSets/Rollouts in inference
+      namespaces, so developers don't have to remember. The validate
+      rule remains as a backstop.
+spec:
+  # Mutations don't have an "enforce vs audit" — they either rewrite the
+  # resource or they don't. The toggle is .enabled.
+  background: false   # mutations don't run on background scans
+  rules:
+    - name: inject-tracing-labels
+      match:
+        any:
+          - resources:
+              kinds: [Deployment, StatefulSet, Rollout]
+              namespaces:
+                {{- range .namespaces }}
+                - {{ . }}
+                {{- end }}
+      preconditions:
+        # Only mutate if the label is actually missing. If it's already
+        # set (even to a different value), don't overwrite — that would
+        # surprise developers who set it intentionally.
+        all:
+          {{- range $k, $v := .requiredLabels }}
+          - key: {{ printf "{{ request.object.spec.template.metadata.labels.\"%s\" || '' }}" $k | quote }}
+            operator: Equals
+            value: ""
+          {{- end }}
+      mutate:
+        patchStrategicMerge:
+          spec:
+            template:
+              metadata:
+                labels:
+                  {{- toYaml .requiredLabels | nindent 18 }}
+{{- end }}
+{{- end }}
